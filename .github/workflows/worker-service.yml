@@ -19,6 +19,7 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
+    if: false  # Disabled - replaced by unified build-and-deploy.yml workflow
     steps:
       - uses: actions/checkout@v4
       

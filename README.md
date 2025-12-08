@@ -191,6 +191,29 @@ LibreChat MCP is deployed as part of your Kubernetes stack. The CI/CD pipeline w
 - You may need to destroy/recreate servers if you change the SSH key after initial deployment.
 - You can manually run `terraform taint` and `terraform apply` in the `terraform/` directory if needed.
 
+## GitHub Actions Secrets
+
+This repository uses GitHub Actions for automated CI/CD. The following secrets must be configured in the repository settings (Settings → Secrets and variables → Actions):
+
+### Required Secrets
+
+- **`PARENT_REPO_TOKEN`** - Personal Access Token (PAT) with `repo` scope to trigger the parent repository (TheMaryAnne) workflow after successful image push. This token must have permissions to trigger `repository_dispatch` events in the parent repository.
+
+### How to Generate the Token
+
+1. Go to GitHub Settings → Developer settings → Personal access tokens → Tokens (classic)
+2. Generate a new token with the `repo` scope
+3. Add it as a secret named `PARENT_REPO_TOKEN` in this repository's secrets
+
+### Automated Deployment Flow
+
+When code is pushed to the `main` branch (affecting McpService or Worker):
+1. Tests run for both MCP Service and Worker
+2. Both Docker images are built and pushed to GitHub Container Registry (unified workflow ensures both are built)
+3. Parent repository (TheMaryAnne) is automatically triggered to update the submodule reference and deploy both services
+
+**Note:** The unified `build-and-deploy.yml` workflow ensures both MCP Service and Worker images are built and pushed before triggering the parent repo, guaranteeing atomic deployments.
+
 ## Roadmap
 
 For current bugs, todos, and planned features, see [ROADMAP.md](ROADMAP.md).
