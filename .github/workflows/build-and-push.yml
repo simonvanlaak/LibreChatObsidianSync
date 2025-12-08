@@ -1,0 +1,84 @@
+name: Build and Push Docker Images
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'McpService/**'
+      - 'Worker/**'
+      - '.github/workflows/build-and-push.yml'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  MCP_SERVICE_IMAGE: ${{ github.repository_owner }}/obsidian-sync-mcp
+  WORKER_IMAGE: ${{ github.repository_owner }}/obsidian-sync-worker
+
+jobs:
+  build-mcpservice:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Extract short SHA
+        id: sha
+        run: echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+      
+      - name: Build and push MCP Service image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./McpService
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.MCP_SERVICE_IMAGE }}:latest
+            ${{ env.REGISTRY }}/${{ env.MCP_SERVICE_IMAGE }}:${{ steps.sha.outputs.SHORT_SHA }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  build-worker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Extract short SHA
+        id: sha
+        run: echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+      
+      - name: Build and push Worker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./Worker
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.WORKER_IMAGE }}:latest
+            ${{ env.REGISTRY }}/${{ env.WORKER_IMAGE }}:${{ steps.sha.outputs.SHORT_SHA }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
