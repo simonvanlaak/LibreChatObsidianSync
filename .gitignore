@@ -28,3 +28,5 @@ node_modules/
 # tasks.json
 # tasks/ 
 data/user-files
+
+*__pycache__*
