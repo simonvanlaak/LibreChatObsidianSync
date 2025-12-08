@@ -17,27 +17,16 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from tools import file_storage
 from shared.storage import set_current_user, get_current_user
-import shared.storage
 
 
 @pytest.fixture
 def temp_storage_dir():
-    """Create a temporary storage directory for tests
-    
-    Patches STORAGE_ROOT in shared.storage (which is what get_user_storage_path uses)
-    to ensure tests use a temporary directory instead of the real /storage path.
-    """
+    """Create a temporary storage directory for tests"""
     with tempfile.TemporaryDirectory() as tmpdir:
-        # Patch the STORAGE_ROOT in shared.storage (the actual module used by get_user_storage_path)
-        old_storage_root = shared.storage.STORAGE_ROOT
-        shared.storage.STORAGE_ROOT = Path(tmpdir)
-        # Also patch file_storage.STORAGE_ROOT for consistency (though it's not directly used)
-        old_file_storage_root = file_storage.STORAGE_ROOT
+        old_storage_root = file_storage.STORAGE_ROOT
         file_storage.STORAGE_ROOT = Path(tmpdir)
         yield Path(tmpdir)
-        # Restore original values
-        shared.storage.STORAGE_ROOT = old_storage_root
-        file_storage.STORAGE_ROOT = old_file_storage_root
+        file_storage.STORAGE_ROOT = old_storage_root
 
 
 @pytest.fixture
