@@ -29,4 +29,29 @@ node_modules/
 # tasks/ 
 data/user-files
 
-*__pycache__*
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Testing
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+*.swp
+*.swo
+*~
