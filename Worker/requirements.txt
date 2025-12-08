@@ -1,0 +1,5 @@
+gitpython
+httpx
+python-dotenv
+schedule
+PyJWT

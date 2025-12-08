@@ -1,0 +1,455 @@
+import os
+import time
+import json
+import logging
+import shutil
+import hashlib
+import httpx
+import jwt
+from pathlib import Path
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional
+import git
+from git import Repo, GitCommandError
+
+# Configuration
+STORAGE_ROOT = Path(os.environ.get("STORAGE_ROOT", "/storage"))
+RAG_API_URL = os.environ.get("RAG_API_URL", "http://librechat-rag-api:8000")
+RAG_API_JWT_SECRET = os.environ.get("RAG_API_JWT_SECRET", os.environ.get("JWT_SECRET", ""))
+CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "1500"))
+CHUNK_OVERLAP = int(os.environ.get("CHUNK_OVERLAP", "100"))
+SYNC_INTERVAL = int(os.environ.get("SYNC_INTERVAL", "60"))
+
+# Throttling configuration to prevent RAG API overload
+# Maximum number of files to index per sync cycle per user
+MAX_FILES_PER_CYCLE = int(os.environ.get("MAX_FILES_PER_CYCLE", "10"))
+# Delay between indexing requests (seconds)
+INDEX_DELAY = float(os.environ.get("INDEX_DELAY", "0.5"))
+# Maximum concurrent indexing operations
+MAX_CONCURRENT_INDEXING = int(os.environ.get("MAX_CONCURRENT_INDEXING", "2"))
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger("ObsidianSync")
+
+class IndexingManager:
+    """Handles indexing of markdown files to the RAG API."""
+    
+    def __init__(self, user_id: str):
+        self.user_id = user_id
+
+    def get_file_id(self, filename: str) -> str:
+        """Generate file ID matching LibreChatMCP format."""
+        return f"user_{self.user_id}_{filename}"
+
+    def _generate_jwt_token(self) -> str:
+        """Generate a JWT token for RAG API authentication."""
+        if not RAG_API_JWT_SECRET:
+            logger.warning("RAG_API_JWT_SECRET not set, RAG API requests may fail")
+            return ""
+        
+        # Generate token with user_id in payload (matching LibreChat's format)
+        # Token expires in 5 minutes (matching LibreChat's generateShortLivedToken)
+        payload = {
+            "id": self.user_id,
+            "exp": datetime.utcnow() + timedelta(minutes=5)
+        }
+        return jwt.encode(payload, RAG_API_JWT_SECRET, algorithm="HS256")
+
+    def index_file(self, file_path: Path, max_retries: int = 3, initial_delay: float = 1.0):
+        """Send file content to RAG API with retry logic for transient failures.
+        
+        Args:
+            file_path: Path to the file to index
+            max_retries: Maximum number of retry attempts (default: 3)
+            initial_delay: Initial delay in seconds before first retry (default: 1.0)
+        
+        Returns:
+            True if indexing succeeded, False otherwise
+        """
+        filename = file_path.name
+        
+        for attempt in range(max_retries + 1):  # +1 for initial attempt
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+
+                file_id = self.get_file_id(filename)
+                metadata = {
+                    "user_id": self.user_id,
+                    "filename": filename,
+                    "updated_at": datetime.utcnow().isoformat(),
+                    "source": "obsidian-git-sync"
+                }
+                
+                payload = {
+                    "file_id": file_id,
+                    "content": content,
+                    "metadata": metadata,
+                    "chunk_size": CHUNK_SIZE,
+                    "chunk_overlap": CHUNK_OVERLAP
+                }
+
+                # Generate JWT token for authentication
+                token = self._generate_jwt_token()
+                headers = {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json"
+                }
+                if token:
+                    headers["Authorization"] = f"Bearer {token}"
+
+                # First delete existing embeddings to avoid stale data
+                try:
+                    # URL encode the file_id for the delete request
+                    import urllib.parse
+                    encoded_file_id = urllib.parse.quote(file_id, safe='')
+                    httpx.delete(f"{RAG_API_URL}/embed/{encoded_file_id}", headers=headers, timeout=10.0)
+                except (httpx.ConnectError, httpx.TimeoutException, ConnectionRefusedError):
+                    # Connection errors during delete are OK, we'll retry
+                    if attempt < max_retries:
+                        continue
+                except Exception:
+                    pass # Ignore other errors (e.g., 404)
+
+                # Create new embeddings
+                # RAG API expects FormData with 'file' field (multipart/form-data), not JSON
+                import io
+                
+                # Create multipart form data
+                # httpx expects files as tuple: (filename, file-like object, content_type)
+                files = {
+                    'file': (filename, io.BytesIO(content.encode('utf-8')), 'text/markdown')
+                }
+                data = {
+                    'file_id': file_id
+                }
+                
+                # Add storage_metadata if needed (optional, but LibreChat sends it)
+                if metadata:
+                    data['storage_metadata'] = json.dumps(metadata)
+                
+                # Remove Content-Type header - httpx will set it correctly for multipart
+                multipart_headers = {k: v for k, v in headers.items() if k.lower() != 'content-type'}
+                
+                response = httpx.post(
+                    f"{RAG_API_URL}/embed",
+                    files=files,
+                    data=data,
+                    headers=multipart_headers,
+                    timeout=30.0
+                )
+                
+                # Log response details for debugging 422 errors
+                if response.status_code == 422:
+                    try:
+                        error_detail = response.json()
+                        logger.error(f"422 error details for {filename}: {error_detail}")
+                    except:
+                        logger.error(f"422 error for {filename}: {response.text[:200]}")
+                
+                response.raise_for_status()
+                logger.info(f"Indexed {filename} for user {self.user_id}")
+                return True
+                
+            except (httpx.ConnectError, httpx.TimeoutException, ConnectionRefusedError) as e:
+                # Transient connection errors - retry with exponential backoff
+                if attempt < max_retries:
+                    delay = initial_delay * (2 ** attempt)  # Exponential backoff: 1s, 2s, 4s
+                    logger.warning(
+                        f"Connection error indexing {filename} (attempt {attempt + 1}/{max_retries + 1}): {e}. "
+                        f"Retrying in {delay}s..."
+                    )
+                    time.sleep(delay)
+                    continue
+                else:
+                    logger.error(f"Failed to index {file_path} after {max_retries + 1} attempts: {e}")
+                    return False
+            except httpx.HTTPStatusError as e:
+                # HTTP errors (4xx, 5xx) - don't retry for client errors (4xx), but retry for server errors (5xx)
+                if e.response.status_code >= 500 and attempt < max_retries:
+                    delay = initial_delay * (2 ** attempt)
+                    logger.warning(
+                        f"Server error {e.response.status_code} indexing {filename} (attempt {attempt + 1}/{max_retries + 1}). "
+                        f"Retrying in {delay}s..."
+                    )
+                    time.sleep(delay)
+                    continue
+                else:
+                    logger.error(f"Failed to index {file_path}: HTTP {e.response.status_code} - {e}")
+                    return False
+            except Exception as e:
+                # Other errors - log and fail
+                logger.error(f"Failed to index {file_path}: {e}")
+                return False
+        
+        return False
+
+class GitSync:
+    """Handles Git operations for a specific user vault."""
+    
+    def __init__(self, user_id: str, config: Dict):
+        self.user_id = user_id
+        self.repo_url = config['repo_url']
+        self.token = config['token']
+        self.branch = config.get('branch', 'main')
+        self.vault_path = STORAGE_ROOT / user_id / "obsidian_vault"
+        self.indexer = IndexingManager(user_id)
+
+    def _get_auth_url(self) -> str:
+        """Inject token into URL for auth."""
+        if "://" not in self.repo_url:
+            return self.repo_url
+        protocol, url = self.repo_url.split("://", 1)
+        return f"{protocol}://{self.token}@{url}"
+
+    def sync(self):
+        """Main sync logic: Clone/Pull -> Index -> Commit/Push."""
+        try:
+            repo = self._ensure_repo()
+            
+            # 1. Pull latest changes
+            logger.info(f"Pulling {self.user_id}...")
+            try:
+                repo.remotes.origin.pull(self.branch)
+            except Exception as e:
+                logger.warning(f"Pull failed (might be conflict or empty): {e}")
+                raise  # Re-raise to count as failure
+
+            # 2. Index changes (LIFO by modification time)
+            self._index_vault_files()
+
+            # 3. Push local changes (made by MCP tools)
+            if repo.is_dirty(untracked_files=True):
+                logger.info(f"Pushing changes for {self.user_id}...")
+                repo.git.add(A=True)
+                repo.index.commit(f"Sync from LibreChat: {datetime.utcnow().isoformat()}")
+                repo.remotes.origin.push(self.branch)
+                
+        except Exception as e:
+            logger.error(f"Sync failed for {self.user_id}: {e}")
+            raise  # Re-raise so SyncManager can track the failure
+
+    def _ensure_repo(self) -> Repo:
+        """Clone if not exists, else return Repo object."""
+        auth_url = self._get_auth_url()
+        
+        if not self.vault_path.exists():
+            logger.info(f"Cloning vault for {self.user_id}...")
+            self.vault_path.mkdir(parents=True, exist_ok=True)
+            return Repo.clone_from(auth_url, self.vault_path, branch=self.branch)
+        
+        repo = Repo(self.vault_path)
+        
+        # Update remote URL in case token changed
+        if 'origin' in repo.remotes:
+            repo.remotes.origin.set_url(auth_url)
+        else:
+            repo.create_remote('origin', auth_url)
+            
+        return repo
+
+    def _index_vault_files(self):
+        """Scan and index markdown files, prioritizing recent modifications.
+        
+        Implements throttling to prevent RAG API overload:
+        - Limits number of files indexed per cycle
+        - Adds delay between requests
+        - Only indexes changed files
+        - Skips files in directories starting with '.' (e.g., .git)
+        - Indexes files in LIFO order (most recently modified first)
+        """
+        md_files = []
+        for root, dirs, files in os.walk(self.vault_path):
+            # Skip directories that start with '.' (e.g., .git, .obsidian)
+            # Modify dirs in-place to prevent os.walk from descending into them
+            dirs[:] = [d for d in dirs if not d.startswith('.')]
+            
+            # Skip if current directory path contains a '.' directory
+            if any(part.startswith('.') for part in Path(root).parts):
+                continue
+            
+            for file in files:
+                if file.endswith('.md'):
+                    path = Path(root) / file
+                    md_files.append(path)
+        
+        if not md_files:
+            logger.debug(f"No markdown files found for user {self.user_id}")
+            return
+        
+        # Sort by modification time descending (LIFO) - most recently modified first
+        md_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        
+        # Filter to only changed files (maintains LIFO order)
+        changed_files = [f for f in md_files if self._has_changed(f)]
+        
+        if not changed_files:
+            logger.debug(f"No changed files to index for user {self.user_id}")
+            return
+        
+        # Throttle: Limit number of files processed per cycle
+        # Already sorted by modification time (LIFO), so take first N
+        files_to_index = changed_files[:MAX_FILES_PER_CYCLE]
+        
+        if len(changed_files) > MAX_FILES_PER_CYCLE:
+            logger.info(
+                f"Throttling: {len(changed_files)} changed files found, "
+                f"indexing only {MAX_FILES_PER_CYCLE} most recent (LIFO) for user {self.user_id}"
+            )
+        
+        # Index files with delay between requests (already in LIFO order)
+        indexed_count = 0
+        for file_path in files_to_index:
+            try:
+                self.indexer.index_file(file_path)
+                self._update_hash(file_path)
+                indexed_count += 1
+                
+                # Add delay between requests to prevent API overload
+                if indexed_count < len(files_to_index):  # Don't delay after last file
+                    time.sleep(INDEX_DELAY)
+            except Exception as e:
+                logger.error(f"Failed to index {file_path} for user {self.user_id}: {e}")
+                # Continue with next file even if one fails
+        
+        if indexed_count > 0:
+            logger.info(f"Indexed {indexed_count} file(s) for user {self.user_id} (LIFO order)")
+
+    def _has_changed(self, file_path: Path) -> bool:
+        """Check against local hash DB if file changed."""
+        hash_db_path = STORAGE_ROOT / self.user_id / "sync_hashes.json"
+        try:
+            if hash_db_path.exists():
+                with open(hash_db_path, 'r') as f:
+                    hashes = json.load(f)
+            else:
+                hashes = {}
+            
+            old_hash = hashes.get(str(file_path))
+            new_hash = self._compute_hash(file_path)
+            return old_hash != new_hash
+        except Exception:
+            return True
+
+    def _update_hash(self, file_path: Path):
+        """Update local hash DB."""
+        hash_db_path = STORAGE_ROOT / self.user_id / "sync_hashes.json"
+        try:
+            if hash_db_path.exists():
+                with open(hash_db_path, 'r') as f:
+                    hashes = json.load(f)
+            else:
+                hashes = {}
+            
+            hashes[str(file_path)] = self._compute_hash(file_path)
+            
+            with open(hash_db_path, 'w') as f:
+                json.dump(hashes, f)
+        except Exception as e:
+            logger.warning(f"Failed to update hash DB: {e}")
+
+    def _compute_hash(self, file_path: Path) -> str:
+        """MD5 hash of file."""
+        return hashlib.md5(file_path.read_bytes()).hexdigest()
+
+
+class SyncManager:
+    """Manages sync cycles for all configured users."""
+    
+    MAX_FAILURES = 5  # Stop syncing after 5 consecutive failures
+    
+    def run(self):
+        """Main loop."""
+        logger.info("SyncManager started.")
+        while True:
+            self.process_cycle()
+            time.sleep(SYNC_INTERVAL)
+
+    def _update_sync_status(self, user_id: str, success: bool, error: Optional[str] = None):
+        """Update sync status in git_config.json."""
+        config_path = STORAGE_ROOT / user_id / "git_config.json"
+        if not config_path.exists():
+            return
+        
+        try:
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+            
+            if success:
+                # Reset failure count on success
+                config['failure_count'] = 0
+                config['last_success'] = datetime.utcnow().isoformat()
+                config['stopped'] = False
+                config.pop('last_failure', None)  # Remove last_failure on success
+            else:
+                # Increment failure count
+                current_failures = config.get('failure_count', 0) + 1
+                config['failure_count'] = current_failures
+                config['last_failure'] = datetime.utcnow().isoformat()
+                config['last_failure_error'] = str(error) if error else "Unknown error"
+                
+                # Stop if max failures reached
+                if current_failures >= self.MAX_FAILURES:
+                    config['stopped'] = True
+                    logger.warning(f"Sync stopped for user {user_id} after {current_failures} failures")
+            
+            # Atomic write
+            temp_path = config_path.with_suffix('.json.tmp')
+            with open(temp_path, 'w') as f:
+                json.dump(config, f, indent=2)
+            temp_path.replace(config_path)
+            
+        except Exception as e:
+            logger.error(f"Failed to update sync status for user {user_id}: {e}")
+
+    def process_cycle(self):
+        """Run one sync cycle across all users."""
+        logger.info("Starting sync cycle...")
+        # Scan for users
+        if not STORAGE_ROOT.exists():
+            logger.warning(f"Storage root {STORAGE_ROOT} does not exist.")
+            return
+
+        user_count = 0
+        skipped_count = 0
+        for user_dir in STORAGE_ROOT.iterdir():
+            if user_dir.is_dir():
+                config_path = user_dir / "git_config.json"
+                if config_path.exists():
+                    user_count += 1
+                    try:
+                        with open(config_path, 'r') as f:
+                            config = json.load(f)
+                        
+                        user_id = user_dir.name
+                        
+                        # Check if sync is stopped due to failures
+                        if config.get('stopped', False):
+                            skipped_count += 1
+                            logger.info(f"Skipping user {user_id} - sync stopped after {config.get('failure_count', 0)} failures")
+                            continue
+                        
+                        logger.info(f"Processing user: {user_id}")
+                        syncer = GitSync(user_id, config)
+                        syncer.sync()
+                        
+                        # Mark as successful
+                        self._update_sync_status(user_id, success=True)
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing user {user_dir.name}: {e}")
+                        # Mark as failed
+                        self._update_sync_status(user_dir.name, success=False, error=str(e))
+        
+        logger.info(f"Sync cycle completed. Found {user_count} user config(s), skipped {skipped_count} stopped sync(s).")
+
+
+def main():
+    logger.info("Obsidian Sync Service starting...")
+    manager = SyncManager()
+    manager.run()
+
+if __name__ == "__main__":
+    main()
+
