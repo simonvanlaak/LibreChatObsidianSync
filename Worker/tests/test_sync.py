@@ -8,6 +8,14 @@ from unittest.mock import MagicMock
 
 # Mock git module before importing main
 sys.modules["git"] = MagicMock()
+import sys
+from pathlib import Path
+
+# Add Worker directory to path
+WORKER_DIR = Path(__file__).parent.parent
+if str(WORKER_DIR) not in sys.path:
+    sys.path.insert(0, str(WORKER_DIR))
+
 from main import GitSync, SyncManager, IndexingManager
 
 class TestGitSync(unittest.TestCase):
