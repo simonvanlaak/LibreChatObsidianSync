@@ -6,7 +6,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from .auth import get_user_from_token
-from .storage import set_current_user
+from .storage import set_current_user, set_obsidian_headers, clear_obsidian_headers
 
 
 class SetUserIdFromHeaderMiddleware(BaseHTTPMiddleware):
@@ -59,7 +59,7 @@ class SetUserIdFromHeaderMiddleware(BaseHTTPMiddleware):
         if user_id and not (user_id.startswith("{{") and user_id.endswith("}}")):
             set_current_user(user_id)
             
-            # Auto-configure Obsidian sync if headers are present
+            # Store Obsidian headers in context for potential auto-configuration
             # LibreChat normalizes headers to lowercase, so check both cases
             repo_url = (
                 request.headers.get("x-obsidian-repo-url") or 
@@ -75,6 +75,10 @@ class SetUserIdFromHeaderMiddleware(BaseHTTPMiddleware):
                 "main"
             )
             
+            # Store headers in context (even if placeholders, so status check can see them)
+            set_obsidian_headers(repo_url, token, branch)
+            
+            # Auto-configure Obsidian sync if headers are present and valid
             # Only auto-configure if we have repo_url and token (required)
             if repo_url and token:
                 try:
@@ -109,4 +113,5 @@ class SetUserIdFromHeaderMiddleware(BaseHTTPMiddleware):
         
         response = await call_next(request)
         set_current_user(None)
+        clear_obsidian_headers()
         return response

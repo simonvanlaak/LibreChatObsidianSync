@@ -14,7 +14,7 @@ from typing import Optional
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from shared.storage import get_current_user, get_user_storage_path
+from shared.storage import get_current_user, get_user_storage_path, get_obsidian_headers
 
 
 async def auto_configure_obsidian_sync(
@@ -222,20 +222,62 @@ async def get_obsidian_sync_status() -> str:
     """
     Get the current status of Obsidian sync, including failure information.
     
+    If no configuration exists but Obsidian headers are present (customUserVars set),
+    automatically attempts to initialize the configuration.
+    
     Returns:
         Detailed status message including sync state, failure count, and last sync times
     """
+    import logging
+    logger = logging.getLogger(__name__)
+    
     user_id = get_current_user()
     user_dir = get_user_storage_path(user_id)
     config_path = user_dir / "git_config.json"
     
     if not config_path.exists():
-        return (
-            "No Obsidian sync configuration found.\n"
-            "To configure, either:\n"
-            "1. Set customUserVars in UI settings (OBSIDIAN_REPO_URL, OBSIDIAN_TOKEN, OBSIDIAN_BRANCH) - recommended\n"
-            "2. Use configure_obsidian_sync tool with repo_url and token parameters"
-        )
+        # Check if Obsidian headers are available (customUserVars set in UI)
+        repo_url, token, branch = get_obsidian_headers()
+        
+        # Check if headers are present and not placeholders
+        def is_placeholder(value: str) -> bool:
+            return value and value.startswith("{{") and value.endswith("}}")
+        
+        if repo_url and token and not is_placeholder(repo_url) and not is_placeholder(token):
+            # Headers are present and valid - attempt auto-configuration
+            logger.info(f"Attempting auto-configuration for user {user_id} from status check")
+            try:
+                # Use default branch if not provided
+                if not branch or is_placeholder(branch):
+                    branch = "main"
+                
+                await auto_configure_obsidian_sync(user_id, repo_url, token, branch)
+                logger.info(f"✅ Successfully auto-configured Obsidian sync for user {user_id}")
+                return (
+                    f"✅ Obsidian sync configuration successfully initialized!\n"
+                    f"Repository: {repo_url}\n"
+                    f"Branch: {branch}\n"
+                    f"Configuration was automatically created from customUserVars set in UI settings.\n\n"
+                    f"Sync is now active and will start on the next cycle."
+                )
+            except Exception as e:
+                logger.error(f"Failed to auto-configure Obsidian sync for user {user_id}: {e}")
+                return (
+                    f"❌ Failed to initialize Obsidian sync configuration.\n"
+                    f"Error: {str(e)}\n\n"
+                    f"Please check:\n"
+                    f"1. That customUserVars are correctly set in UI settings (OBSIDIAN_REPO_URL, OBSIDIAN_TOKEN, OBSIDIAN_BRANCH)\n"
+                    f"2. That the repository URL and token are valid\n"
+                    f"3. Or use configure_obsidian_sync tool with repo_url and token parameters"
+                )
+        else:
+            # No headers or headers are placeholders
+            return (
+                "No Obsidian sync configuration found.\n"
+                "To configure, either:\n"
+                "1. Set customUserVars in UI settings (OBSIDIAN_REPO_URL, OBSIDIAN_TOKEN, OBSIDIAN_BRANCH) - recommended\n"
+                "2. Use configure_obsidian_sync tool with repo_url and token parameters"
+            )
     
     try:
         async with aiofiles.open(config_path, 'r', encoding='utf-8') as f:
