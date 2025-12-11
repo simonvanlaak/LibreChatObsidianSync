@@ -17,6 +17,88 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from shared.storage import get_current_user, get_user_storage_path
 
 
+async def auto_configure_obsidian_sync(
+    user_id: str,
+    repo_url: str,
+    token: str,
+    branch: str = "main"
+) -> None:
+    """
+    Automatically configure Obsidian sync when credentials are provided via headers.
+    This is called by middleware when customUserVars are set.
+    
+    Args:
+        user_id: LibreChat user ID
+        repo_url: Git repository URL
+        token: Personal Access Token
+        branch: Git branch name (defaults to "main")
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    # Validate that values are not placeholders (LibreChat bug: placeholders not replaced)
+    def is_placeholder(value: str) -> bool:
+        """Check if value is an unreplaced LibreChat placeholder."""
+        return value.startswith("{{") and value.endswith("}}")
+    
+    if is_placeholder(repo_url) or is_placeholder(token) or is_placeholder(branch):
+        logger.warning(
+            f"Rejecting placeholder values for user {user_id}. "
+            f"LibreChat did not replace placeholders in customUserVars. "
+            f"repo_url is placeholder: {is_placeholder(repo_url)}, "
+            f"token is placeholder: {is_placeholder(token)}, "
+            f"branch is placeholder: {is_placeholder(branch)}"
+        )
+        raise ValueError(
+            "Invalid configuration: LibreChat did not replace placeholder values. "
+            "Please ensure customUserVars are properly set in LibreChat UI settings."
+        )
+    
+    user_dir = get_user_storage_path(user_id)
+    config_path = user_dir / "git_config.json"
+    temp_path = user_dir / "git_config.json.tmp"
+    
+    # Check if config already exists and is the same
+    if config_path.exists():
+        try:
+            async with aiofiles.open(config_path, 'r', encoding='utf-8') as f:
+                content = await f.read()
+                existing_config = json.loads(content)
+            # Only update if values changed
+            if (existing_config.get("repo_url") == repo_url and
+                existing_config.get("token") == token and
+                existing_config.get("branch") == branch):
+                logger.debug(f"Obsidian sync config unchanged for user {user_id}")
+                return  # No changes needed
+        except (json.JSONDecodeError, FileNotFoundError) as e:
+            logger.warning(f"Failed to read existing config for user {user_id}: {e}")
+            # Proceed with write if read fails
+    
+    config = {
+        "repo_url": repo_url,
+        "token": token,
+        "branch": branch,
+        "updated_at": datetime.utcnow().isoformat(),
+        "auto_configured": True,
+        "version": "1.0",  # For future migrations
+        "failure_count": 0,  # Reset failure count when auto-configuring
+        "stopped": False
+    }
+    
+    try:
+        # Atomic write: write to temp file, then rename
+        async with aiofiles.open(temp_path, 'w', encoding='utf-8') as f:
+            await f.write(json.dumps(config, indent=2))
+        temp_path.replace(config_path)  # Atomic rename
+        logger.info(f"Auto-configured Obsidian sync for user {user_id}")
+    except Exception as e:
+        # Clean up temp file on error
+        if temp_path.exists():
+            temp_path.unlink()
+        logger.error(f"Failed to save sync configuration for user {user_id}: {e}")
+        raise RuntimeError(f"Failed to save sync configuration: {e}")
+
+
 async def configure_obsidian_sync(repo_url: str = None, token: str = None, branch: str = "main") -> str:
     """
     Configure Git Sync for Obsidian Vault.

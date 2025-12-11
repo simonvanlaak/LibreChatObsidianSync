@@ -1,7 +1,6 @@
 """
-Simplified middleware for ObsidianSyncMCP.
-Only handles OAuth token extraction and user identification.
-No auto-configuration logic (removed for separation).
+Middleware for ObsidianSyncMCP.
+Handles OAuth token extraction, user identification, and auto-configuration of Obsidian sync.
 """
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -13,11 +12,14 @@ from .storage import set_current_user
 class SetUserIdFromHeaderMiddleware(BaseHTTPMiddleware):
     """
     Middleware to extract user ID from OAuth token or headers.
-    Simplified version without obsidian sync auto-configuration.
+    Also handles auto-configuration of Obsidian sync when customUserVars are provided.
     """
     
     async def dispatch(self, request: Request, call_next):
         import logging
+        import sys
+        from pathlib import Path
+        
         logger = logging.getLogger(__name__)
         
         user_id = None
@@ -56,6 +58,42 @@ class SetUserIdFromHeaderMiddleware(BaseHTTPMiddleware):
         # Only set user_id if it's valid (not None and not a placeholder)
         if user_id and not (user_id.startswith("{{") and user_id.endswith("}}")):
             set_current_user(user_id)
+            
+            # Auto-configure Obsidian sync if headers are present
+            # LibreChat normalizes headers to lowercase, so check both cases
+            repo_url = (
+                request.headers.get("x-obsidian-repo-url") or 
+                request.headers.get("X-Obsidian-Repo-URL")
+            )
+            token = (
+                request.headers.get("x-obsidian-token") or 
+                request.headers.get("X-Obsidian-Token")
+            )
+            branch = (
+                request.headers.get("x-obsidian-branch") or 
+                request.headers.get("X-Obsidian-Branch") or 
+                "main"
+            )
+            
+            # Only auto-configure if we have repo_url and token (required)
+            if repo_url and token:
+                try:
+                    # Import here to avoid circular dependencies
+                    sys.path.insert(0, str(Path(__file__).parent.parent))
+                    from tools.obsidian_sync import auto_configure_obsidian_sync
+                    
+                    # Check if values are not placeholders before calling
+                    def is_placeholder(value: str) -> bool:
+                        return value and value.startswith("{{") and value.endswith("}}")
+                    
+                    if not is_placeholder(repo_url) and not is_placeholder(token):
+                        await auto_configure_obsidian_sync(user_id, repo_url, token, branch)
+                        logger.info(f"✅ Auto-configured Obsidian sync for user {user_id}")
+                    else:
+                        logger.debug(f"Skipping auto-configuration: placeholder values detected")
+                except Exception as e:
+                    # Log but don't fail the request if auto-configuration fails
+                    logger.warning(f"Failed to auto-configure Obsidian sync for user {user_id}: {e}")
         else:
             # Don't set invalid user_id - get_current_user() will raise proper error
             set_current_user(None)
