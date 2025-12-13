@@ -10,6 +10,7 @@ import os
 import json
 import httpx
 import aiofiles
+import asyncio
 from pathlib import Path
 from typing import List, Dict, Optional
 from datetime import datetime
@@ -469,6 +470,9 @@ async def search_files(query: str, max_results: int = 5) -> str:
     """
     Search user's files using semantic search via RAG API.
     
+    Follows LibreChat's file search pattern: queries each file individually
+    and combines results, matching the format used in LibreChat's fileSearch.js.
+    
     Args:
         query: Search query text
         max_results: Maximum number of results to return (default: 5)
@@ -477,45 +481,143 @@ async def search_files(query: str, max_results: int = 5) -> str:
         Search results with relevant excerpts
     """
     user_id = get_current_user()
+    user_dir = get_user_storage_path(user_id)
     
-    try:
-        token = _generate_jwt_token(user_id)
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json"
-        }
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"{RAG_API_URL}/query",
-                json={
-                    "query": query,
-                    "filters": {
-                        "user_id": user_id  # Only search this user's files
+    # Get all markdown files for the user (from vault and root)
+    files_to_search = []
+    vault_path = user_dir / "obsidian_vault"
+    
+    # Collect markdown files from vault
+    # IMPORTANT: Use only filename (not path) for file_id to match Worker's indexing format
+    # Worker uses: get_file_id(user_id, filename) where filename is just the basename
+    if vault_path.exists():
+        for file_path in vault_path.rglob("*.md"):
+            if file_path.is_file():
+                relative_path = file_path.relative_to(user_dir)
+                # Use only filename (not full path) to match Worker's file_id format
+                files_to_search.append({
+                    "file_id": get_file_id(user_id, file_path.name),  # Just filename, not path
+                    "filename": file_path.name,
+                    "path": str(relative_path)
+                })
+    
+    # Also check root directory for markdown files
+    for file_path in user_dir.glob("*.md"):
+        if file_path.is_file():
+            files_to_search.append({
+                "file_id": get_file_id(user_id, file_path.name),
+                "filename": file_path.name,
+                "path": file_path.name
+            })
+    
+    if not files_to_search:
+        return f"No markdown files found to search for query: '{query}'"
+    
+    # Generate JWT token for authentication
+    token = _generate_jwt_token(user_id)
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    
+    # Query each file individually (matching LibreChat's pattern)
+    all_results = []
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        query_tasks = []
+        for file_info in files_to_search:
+            # Use same format as LibreChat: file_id, query, k
+            query_tasks.append(
+                client.post(
+                    f"{RAG_API_URL}/query",
+                    json={
+                        "file_id": file_info["file_id"],
+                        "query": query,
+                        "k": max_results  # Query more per file, then we'll limit total
                     },
-                    "top_k": max_results
-                },
-                headers=headers
+                    headers=headers
+                )
             )
-            response.raise_for_status()
-            results = response.json()
-    except Exception as e:
-        raise RuntimeError(f"Failed to query RAG API: {e}")
+        
+        # Execute all queries in parallel
+        responses = await asyncio.gather(*query_tasks, return_exceptions=True)
+        
+        # Process responses (matching LibreChat's fileSearch.js pattern)
+        for i, response in enumerate(responses):
+            if isinstance(response, Exception):
+                # Log but continue with other files
+                continue
+            
+            try:
+                response.raise_for_status()
+                # In httpx, response.json() returns the JSON body directly
+                # LibreChat's axios returns result.data which is the same
+                data = response.json()
+                
+                # LibreChat's RAG API returns: array of [docInfo, distance] tuples
+                # Format: [[{page_content, metadata}, distance], ...]
+                # See fileSearch.js line 130: result.data.map(([docInfo, distance]) => ...)
+                if isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, list) and len(item) == 2:
+                            doc_info, distance = item
+                            # Extract content and metadata (matching LibreChat's structure)
+                            page_content = doc_info.get("page_content") or doc_info.get("text", "")
+                            metadata = doc_info.get("metadata", {})
+                            
+                            all_results.append({
+                                "filename": files_to_search[i]["filename"],
+                                "path": files_to_search[i]["path"],
+                                "content": page_content,
+                                "distance": distance,
+                                "metadata": metadata,
+                                "file_id": files_to_search[i]["file_id"]
+                            })
+                # Fallback: handle other response formats
+                elif isinstance(data, dict):
+                    # Try results array
+                    if "results" in data:
+                        for result in data["results"]:
+                            all_results.append({
+                                "filename": files_to_search[i]["filename"],
+                                "path": files_to_search[i]["path"],
+                                "content": result.get("text", result.get("page_content", "")),
+                                "distance": result.get("distance", 1.0 - result.get("score", 0.0)),
+                                "metadata": result.get("metadata", {}),
+                                "file_id": files_to_search[i]["file_id"]
+                            })
+            except httpx.HTTPStatusError as e:
+                # Log detailed error for debugging
+                if e.response.status_code == 422:
+                    error_detail = e.response.text
+                    print(f"Warning: 422 error querying file {files_to_search[i]['file_id']}: {error_detail}")
+                # Continue with other files
+                continue
+            except Exception as e:
+                # Log but continue with other files
+                print(f"Warning: Error querying file {files_to_search[i]['file_id']}: {e}")
+                continue
     
-    if not results or not results.get("results"):
+    if not all_results:
         return f"No results found for query: '{query}'"
     
+    # Sort by distance (lower is better) and limit results
+    all_results.sort(key=lambda x: x["distance"])
+    top_results = all_results[:max_results]
+    
     # Format results
-    output = f"Found {len(results['results'])} result(s) for '{query}':\n\n"
-    for i, result in enumerate(results["results"], 1):
-        metadata = result.get("metadata", {})
-        filename = metadata.get("filename", "unknown")
-        score = result.get("score", 0.0)
-        excerpt = result.get("text", "")[:200]  # First 200 chars
+    output = f"Found {len(top_results)} result(s) for '{query}':\n\n"
+    for i, result in enumerate(top_results, 1):
+        relevance = 1.0 - result["distance"]  # Convert distance to relevance score
+        excerpt = result["content"][:200]  # First 200 chars
+        filename = result["filename"]
+        path = result["path"]
         
-        output += f"{i}. {filename} (score: {score:.3f})\n"
+        output += f"{i}. {filename}"
+        if path != filename:
+            output += f" ({path})"
+        output += f" (relevance: {relevance:.3f})\n"
         output += f"   {excerpt}...\n\n"
     
     return output

@@ -35,12 +35,74 @@ logger = logging.getLogger("ObsidianSync")
 class IndexingManager:
     """Handles indexing of markdown files to the RAG API."""
     
-    def __init__(self, user_id: str):
+    def __init__(self, user_id: str, vault_path: Optional[Path] = None):
         self.user_id = user_id
+        self.vault_path = vault_path or (STORAGE_ROOT / user_id / "obsidian_vault")
 
     def get_file_id(self, filename: str) -> str:
         """Generate file ID matching LibreChatMCP format."""
         return f"user_{self.user_id}_{filename}"
+
+    def _cleanup_hidden_directory_files_from_rag(self):
+        """Remove any files from directories starting with '.' that may have been indexed in the RAG API.
+        
+        This cleans up files from .git, .obsidian, .vscode, and any other hidden directories
+        to ensure no files from hidden directories remain in the vector database.
+        """
+        try:
+            token = self._generate_jwt_token()
+            if not token:
+                logger.warning("Cannot cleanup hidden directory files: JWT token not available")
+                return
+            
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Authorization": f"Bearer {token}"
+            }
+            
+            # Find all files in hidden directories (starting with '.')
+            hidden_files = []
+            if self.vault_path.exists():
+                for root, dirs, files in os.walk(self.vault_path):
+                    # Skip hidden directories themselves
+                    if any(part.startswith('.') for part in Path(root).parts):
+                        continue
+                    
+                    for file in files:
+                        if file.endswith('.md'):
+                            path = Path(root) / file
+                            # Check if file is in any hidden directory path
+                            if any(part.startswith('.') for part in path.parts):
+                                filename = path.name
+                                file_id = self.get_file_id(filename)
+                                hidden_files.append((file_id, str(path)))
+            
+            # Remove each hidden directory file from RAG API
+            if hidden_files:
+                logger.info(f"Cleaning up {len(hidden_files)} file(s) from hidden directories in RAG API for user {self.user_id}")
+                import urllib.parse
+                
+                for file_id, file_path in hidden_files:
+                    try:
+                        encoded_file_id = urllib.parse.quote(file_id, safe='')
+                        response = httpx.delete(
+                            f"{RAG_API_URL}/embed/{encoded_file_id}",
+                            headers=headers,
+                            timeout=10.0
+                        )
+                        if response.status_code in [200, 204]:
+                            logger.info(f"Removed hidden directory file from RAG API: {file_path} (file_id: {file_id})")
+                        elif response.status_code == 404:
+                            logger.debug(f"Hidden directory file not found in RAG API (already removed): {file_path}")
+                        else:
+                            logger.warning(f"Failed to remove hidden directory file from RAG API: {file_path} (status: {response.status_code})")
+                    except Exception as e:
+                        logger.warning(f"Error removing hidden directory file {file_path} from RAG API: {e}")
+            else:
+                logger.debug(f"No hidden directory files found to cleanup for user {self.user_id}")
+        except Exception as e:
+            logger.warning(f"Error during hidden directory cleanup for user {self.user_id}: {e}")
 
     def _generate_jwt_token(self) -> str:
         """Generate a JWT token for RAG API authentication."""
@@ -194,7 +256,10 @@ class GitSync:
         self.token = config['token']
         self.branch = config.get('branch', 'main')
         self.vault_path = STORAGE_ROOT / user_id / "obsidian_vault"
-        self.indexer = IndexingManager(user_id)
+        self.indexer = IndexingManager(user_id, self.vault_path)
+        # Cleanup any files from hidden directories (starting with '.') that may have been indexed previously
+        # This runs once per sync cycle to ensure no hidden directory files remain in RAG API
+        self.indexer._cleanup_hidden_directory_files_from_rag()
 
     def _get_auth_url(self) -> str:
         """Inject token into URL for auth."""
@@ -256,22 +321,27 @@ class GitSync:
         - Limits number of files indexed per cycle
         - Adds delay between requests
         - Only indexes changed files
-        - Skips files in directories starting with '.' (e.g., .git)
+        - Explicitly excludes ALL directories starting with '.' (e.g., .git, .obsidian, .vscode)
+        - Skips files in any directory path containing a '.' directory
         - Indexes files in LIFO order (most recently modified first)
         """
         md_files = []
         for root, dirs, files in os.walk(self.vault_path):
-            # Skip directories that start with '.' (e.g., .git, .obsidian)
+            # Skip directories that start with '.' (e.g., .git, .obsidian, .vscode, etc.)
             # Modify dirs in-place to prevent os.walk from descending into them
             dirs[:] = [d for d in dirs if not d.startswith('.')]
             
-            # Skip if current directory path contains a '.' directory
+            # Skip if current directory path contains any '.' directory
             if any(part.startswith('.') for part in Path(root).parts):
                 continue
             
             for file in files:
                 if file.endswith('.md'):
                     path = Path(root) / file
+                    # Double-check: explicitly exclude any file in a '.' directory path
+                    if any(part.startswith('.') for part in path.parts):
+                        logger.debug(f"Skipping file in hidden directory: {path}")
+                        continue
                     md_files.append(path)
         
         if not md_files:
