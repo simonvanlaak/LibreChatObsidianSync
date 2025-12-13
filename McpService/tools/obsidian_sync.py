@@ -7,6 +7,7 @@ All operations are scoped to the authenticated user.
 
 import json
 import aiofiles
+import os
 import sys
 from pathlib import Path
 from datetime import datetime
@@ -341,6 +342,48 @@ async def get_obsidian_sync_status() -> str:
         
         sync_percentage = (synced_files / total_files * 100) if total_files > 0 else 0
         
+        # Calculate ETA for sync completion
+        def format_eta_minutes(total_minutes: int) -> str:
+            """Format minutes into human-friendly ETA string (e.g., '1 day and 2 hours and 15 minutes')"""
+            if total_minutes <= 0:
+                return "less than 1 minute"
+            
+            days = total_minutes // (24 * 60)
+            hours = (total_minutes % (24 * 60)) // 60
+            minutes = total_minutes % 60
+            
+            parts = []
+            if days > 0:
+                parts.append(f"{days} day{'s' if days != 1 else ''}")
+            if hours > 0:
+                parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
+            if minutes > 0:
+                parts.append(f"{minutes} minute{'s' if minutes != 1 else ''}")
+            
+            if not parts:
+                return "less than 1 minute"
+            
+            if len(parts) == 1:
+                return parts[0]
+            elif len(parts) == 2:
+                return f"{parts[0]} and {parts[1]}"
+            else:
+                return f"{', '.join(parts[:-1])}, and {parts[-1]}"
+        
+        # Calculate ETA using environment variables
+        eta_minutes = None
+        if total_files > 0 and synced_files < total_files:
+            remaining_files = total_files - synced_files
+            # Get sync configuration from environment variables (with defaults)
+            files_per_cycle = int(os.environ.get("MAX_FILES_PER_CYCLE", "10"))
+            sync_interval_seconds = int(os.environ.get("SYNC_INTERVAL", "60"))
+            sync_interval_minutes = sync_interval_seconds / 60.0
+            
+            # Calculate cycles needed (ceiling division)
+            cycles_needed = (remaining_files + files_per_cycle - 1) // files_per_cycle
+            # Convert to minutes (cycles * interval in minutes)
+            eta_minutes = int(round(cycles_needed * sync_interval_minutes))
+        
         # Sync status information
         stopped = config.get('stopped', False)
         failure_count = config.get('failure_count', 0)
@@ -383,6 +426,9 @@ async def get_obsidian_sync_status() -> str:
             if sync_percentage < 100:
                 remaining = total_files - synced_files
                 status.append(f"Remaining: {remaining} file(s) to sync")
+                if eta_minutes is not None:
+                    eta_string = format_eta_minutes(eta_minutes)
+                    status.append(f"**Estimated time to completion:** {eta_string}")
             status.append("")
         
         if stopped:
