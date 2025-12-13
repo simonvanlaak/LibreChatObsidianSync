@@ -36,9 +36,19 @@ class SetUserIdFromHeaderMiddleware(BaseHTTPMiddleware):
                     if user_id:
                         logger.info(f"✅ Extracted user_id from OAuth token: {user_id}")
                     else:
-                        logger.debug(f"OAuth token provided but not found in token store: {token[:10]}...")
+                        # Log warning for debugging - token not found in store
+                        logger.warning(f"⚠️ OAuth token provided but not found in token store. Token: {token[:20]}... (token store has {len(TOKENS)} tokens)")
+                        logger.warning(f"⚠️ This usually means the service was restarted and tokens were lost. User needs to re-authenticate.")
+                        logger.warning(f"⚠️ Available tokens in store: {list(TOKENS.keys())[:3] if TOKENS else 'None'}")
+                else:
+                    logger.debug(f"Authorization header found but not Bearer token: {auth_header[:20]}...")
             except Exception as e:
-                logger.debug(f"Could not extract user_id from OAuth token: {e}")
+                logger.warning(f"Could not extract user_id from OAuth token: {e}")
+        else:
+            # Log all headers for debugging (but don't log sensitive values)
+            all_headers = {k: v[:20] + "..." if len(v) > 20 else v for k, v in request.headers.items()}
+            logger.warning(f"⚠️ No Authorization header found in request. Available headers: {list(all_headers.keys())}")
+            logger.debug(f"Request headers: {all_headers}")
         
         # Method 2: Header-based extraction (if OAuth didn't work)
         if not user_id:
@@ -106,10 +116,13 @@ class SetUserIdFromHeaderMiddleware(BaseHTTPMiddleware):
             # Only do this for MCP endpoint, not for OAuth endpoints themselves
             if request.url.path == "/mcp" or request.url.path.endswith("/mcp"):
                 logger.warning("OAuth required but no valid token found. Returning 401 to trigger OAuth flow.")
-                return JSONResponse(
+                # LibreChat requires WWW-Authenticate: Bearer header to detect OAuth requirement
+                response = JSONResponse(
                     {"error": "OAuth authentication required", "oauth_required": True},
                     status_code=401
                 )
+                response.headers["WWW-Authenticate"] = "Bearer"
+                return response
         
         response = await call_next(request)
         set_current_user(None)

@@ -259,10 +259,13 @@ async def create_note(title: str, content: str) -> str:
     return await upload_file(filename, note_content)
 
 
-async def list_files() -> str:
+async def list_files(_: str = "") -> str:
     """
     List all files in the user's storage with metadata.
     Includes files in the root directory and in subdirectories (e.g., obsidian_vault).
+    
+    Args:
+        _: Optional parameter (ignored) - FastMCP may pass empty string
     
     Returns:
         Formatted list of files with metadata
@@ -515,17 +518,33 @@ async def _get_query_embedding(query: str, user_id: str) -> list:
                 pass
             
             # Fallback: Embed as temporary document and extract from database
+            # The /embed endpoint expects multipart/form-data with a file, not JSON
             temp_file_id = f"temp_query_{user_id}_{int(datetime.now().timestamp())}"
             
-            # Embed the query text
+            # Create multipart form data with the query text as a file
+            import io
+            files = {
+                'file': ('query.txt', io.BytesIO(query.encode('utf-8')), 'text/plain')
+            }
+            data = {
+                'file_id': temp_file_id
+            }
+            
+            # Add metadata if needed
+            metadata = {"user_id": user_id, "filename": "query.txt"}
+            data['storage_metadata'] = json.dumps(metadata)
+            
+            # Remove Content-Type header - httpx will set it correctly for multipart
+            multipart_headers = {k: v for k, v in headers.items() if k.lower() != 'content-type'}
+            if token:
+                multipart_headers["Authorization"] = f"Bearer {token}"
+            
+            # Embed the query text using multipart/form-data
             embed_response = await client.post(
                 f"{RAG_API_URL}/embed",
-                json={
-                    "file_id": temp_file_id,
-                    "content": query,
-                    "metadata": {"user_id": user_id, "filename": "query.txt"}
-                },
-                headers=headers
+                files=files,
+                data=data,
+                headers=multipart_headers
             )
             embed_response.raise_for_status()
             
@@ -548,10 +567,16 @@ async def _get_query_embedding(query: str, user_id: str) -> list:
                 temp_file_id
             )
             
-            if row and row['embedding']:
+            if row is not None and row.get('embedding') is not None:
                 embedding = row['embedding']
                 # Convert pgvector vector to list
-                embedding_list = embedding.tolist() if hasattr(embedding, 'tolist') else list(embedding)
+                # Handle different types: numpy array, pgvector vector, or list
+                if hasattr(embedding, 'tolist'):
+                    embedding_list = embedding.tolist()
+                elif hasattr(embedding, '__iter__') and not isinstance(embedding, (str, bytes)):
+                    embedding_list = list(embedding)
+                else:
+                    embedding_list = embedding
                 
                 # Clean up temporary embedding
                 await conn.execute(
@@ -610,10 +635,12 @@ async def _query_vectordb_direct(query_embedding: list, user_id: str, max_result
         # Table name is typically langchain_pg_embedding based on docs
         # Filter by user_id in metadata JSONB field
         # <=> operator is cosine distance (lower is better)
+        # Also select custom_id to extract filename as fallback
         query_sql = """
             SELECT 
                 document,
                 cmetadata,
+                custom_id,
                 1 - (embedding <=> $1::vector) as similarity
             FROM langchain_pg_embedding
             WHERE cmetadata->>'user_id' = $2
@@ -625,11 +652,33 @@ async def _query_vectordb_direct(query_embedding: list, user_id: str, max_result
         
         results = []
         for row in rows:
-            metadata = row['cmetadata'] if row['cmetadata'] else {}
+            # Parse metadata - it might be a dict or JSON string
+            metadata_raw = row['cmetadata']
+            if isinstance(metadata_raw, str):
+                try:
+                    metadata = json.loads(metadata_raw)
+                except:
+                    metadata = {}
+            elif isinstance(metadata_raw, dict):
+                metadata = metadata_raw
+            else:
+                metadata = {}
+            
+            # Extract filename from metadata or fallback to custom_id
+            filename = metadata.get("filename") if metadata else None
+            if not filename:
+                # Fallback: extract filename from custom_id (format: user_{user_id}_{filename})
+                custom_id = row.get('custom_id', '')
+                if custom_id and custom_id.startswith(f"user_{user_id}_"):
+                    filename = custom_id.replace(f"user_{user_id}_", "", 1)
+                else:
+                    filename = "unknown"
+            
             results.append({
                 "content": row['document'] or "",
                 "distance": 1.0 - float(row['similarity']),  # Convert similarity to distance
-                "metadata": metadata if isinstance(metadata, dict) else {}
+                "metadata": metadata,
+                "filename": filename  # Explicitly include filename
             })
         
         await conn.close()
@@ -677,8 +726,13 @@ async def search_files(query: str, max_results: int = 5) -> str:
     for i, result in enumerate(top_results, 1):
         relevance = 1.0 - result["distance"]  # Convert distance to relevance score
         excerpt = result["content"][:200] if result["content"] else ""  # First 200 chars
-        metadata = result.get("metadata", {})
-        filename = metadata.get("filename", "unknown")
+        
+        # Get filename from result (explicitly included in _query_vectordb_direct)
+        filename = result.get("filename", "unknown")
+        if filename == "unknown":
+            # Fallback: try to get from metadata
+            metadata = result.get("metadata", {})
+            filename = metadata.get("filename", "unknown")
         
         output += f"{i}. {filename} (relevance: {relevance:.3f})\n"
         output += f"   {excerpt}...\n\n"

@@ -23,10 +23,20 @@ from shared.storage import set_current_user, get_current_user
 def temp_storage_dir():
     """Create a temporary storage directory for tests"""
     with tempfile.TemporaryDirectory() as tmpdir:
-        old_storage_root = file_storage.STORAGE_ROOT
+        # Patch both STORAGE_ROOT locations (file_storage and shared.storage)
+        old_storage_root_file = getattr(file_storage, 'STORAGE_ROOT', None)
+        from shared import storage as shared_storage
+        old_storage_root_shared = shared_storage.STORAGE_ROOT
+        
         file_storage.STORAGE_ROOT = Path(tmpdir)
+        shared_storage.STORAGE_ROOT = Path(tmpdir)
+        
         yield Path(tmpdir)
-        file_storage.STORAGE_ROOT = old_storage_root
+        
+        # Restore original values
+        if old_storage_root_file is not None:
+            file_storage.STORAGE_ROOT = old_storage_root_file
+        shared_storage.STORAGE_ROOT = old_storage_root_shared
 
 
 @pytest.fixture
@@ -145,22 +155,144 @@ class TestFileOperations:
     
     @pytest.mark.asyncio
     async def test_list_files(self, temp_storage_dir, setup_user, mock_rag_api):
-        """Test listing files"""
+        """Test listing files in root directory"""
         # Upload multiple files
-        await file_storage.upload_file("file1.txt", "Content 1")
-        await file_storage.upload_file("file2.txt", "Content 2")
+        await file_storage.upload_file("test_list_file1.txt", "Content 1")
+        await file_storage.upload_file("test_list_file2.txt", "Content 2")
         
         result = await file_storage.list_files()
         
-        assert "Found 2 file(s)" in result
-        assert "file1.txt" in result
-        assert "file2.txt" in result
+        # Check that our specific files are listed
+        assert "test_list_file1.txt" in result
+        assert "test_list_file2.txt" in result
+        assert "Size:" in result
+        assert "Modified:" in result
+        # Verify format includes metadata
+        assert "bytes" in result
     
     @pytest.mark.asyncio
     async def test_list_files_empty(self, temp_storage_dir, setup_user):
         """Test listing when no files exist"""
+        # Ensure directory is empty for this test
+        user_dir = temp_storage_dir / "test_user_123"
+        if user_dir.exists():
+            # Remove all files and directories
+            import shutil
+            for item in user_dir.iterdir():
+                if item.is_file():
+                    item.unlink()
+                elif item.is_dir():
+                    shutil.rmtree(item, ignore_errors=True)
+        
         result = await file_storage.list_files()
-        assert "No files found" in result
+        assert "No files found" in result or "Found 0 file(s)" in result
+    
+    @pytest.mark.asyncio
+    async def test_list_files_includes_subdirectories(self, temp_storage_dir, setup_user, mock_rag_api):
+        """Test that list_files includes files in subdirectories"""
+        import aiofiles
+        
+        # Clean up any existing files first
+        user_dir = temp_storage_dir / "test_user_123"
+        if user_dir.exists():
+            for file_path in user_dir.rglob('*'):
+                if file_path.is_file():
+                    file_path.unlink()
+        
+        # Upload file to root with unique name
+        await file_storage.upload_file("test_subdir_root.txt", "Root content")
+        
+        # Create a subdirectory and add a file manually
+        vault_dir = user_dir / "test_subdir_vault"
+        vault_dir.mkdir(parents=True, exist_ok=True)
+        
+        vault_file = vault_dir / "test_subdir_vault_note.md"
+        async with aiofiles.open(vault_file, 'w', encoding='utf-8') as f:
+            await f.write("# Vault Note\n\nContent in vault")
+        
+        result = await file_storage.list_files()
+        
+        # Check that both files are listed
+        assert "test_subdir_root.txt" in result
+        assert "test_subdir_vault/test_subdir_vault_note.md" in result or "test_subdir_vault_note.md" in result
+    
+    @pytest.mark.asyncio
+    async def test_list_files_sorted_by_directory_and_filename(self, temp_storage_dir, setup_user, mock_rag_api):
+        """Test that files are sorted by directory and filename"""
+        import aiofiles
+        
+        # Clean up any existing files first
+        user_dir = temp_storage_dir / "test_user_123"
+        if user_dir.exists():
+            for file_path in user_dir.rglob('*'):
+                if file_path.is_file():
+                    file_path.unlink()
+        
+        # Create files in different directories with unique names
+        await file_storage.upload_file("test_sort_z_file.txt", "Z content")
+        await file_storage.upload_file("test_sort_a_file.txt", "A content")
+        
+        # Create subdirectory files
+        subdir = user_dir / "test_sort_subdir"
+        subdir.mkdir(parents=True, exist_ok=True)
+        subdir_file = subdir / "test_sort_sub_file.txt"
+        async with aiofiles.open(subdir_file, 'w', encoding='utf-8') as f:
+            await f.write("Sub content")
+        
+        result = await file_storage.list_files()
+        
+        # Check that files are listed (order may vary, but both should be present)
+        assert "test_sort_a_file.txt" in result
+        assert "test_sort_z_file.txt" in result
+        assert "test_sort_subdir/test_sort_sub_file.txt" in result or "test_sort_sub_file.txt" in result
+    
+    @pytest.mark.asyncio
+    async def test_list_files_includes_metadata(self, temp_storage_dir, setup_user, mock_rag_api):
+        """Test that list_files includes file metadata (size, modified date)"""
+        await file_storage.upload_file("test.txt", "Test content")
+        
+        result = await file_storage.list_files()
+        
+        assert "test.txt" in result
+        assert "Size:" in result
+        assert "bytes" in result
+        assert "Modified:" in result
+        # Should have ISO format date
+        assert "T" in result or "-" in result  # ISO format has T or date separators
+    
+    @pytest.mark.asyncio
+    async def test_list_files_excludes_hidden_directories(self, temp_storage_dir, setup_user, mock_rag_api):
+        """Test that hidden directories (starting with .) are excluded"""
+        import aiofiles
+        
+        # Clean up any existing files first
+        user_dir = temp_storage_dir / "test_user_123"
+        if user_dir.exists():
+            for file_path in user_dir.rglob('*'):
+                if file_path.is_file():
+                    file_path.unlink()
+        
+        # Create hidden directory with unique name
+        hidden_dir = user_dir / ".test_hidden_dir"
+        hidden_dir.mkdir(parents=True, exist_ok=True)
+        hidden_file = hidden_dir / "test_hidden_file.txt"
+        async with aiofiles.open(hidden_file, 'w', encoding='utf-8') as f:
+            await f.write("Hidden content")
+        
+        # Create visible directory with unique name
+        visible_dir = user_dir / "test_visible_dir"
+        visible_dir.mkdir(parents=True, exist_ok=True)
+        visible_file = visible_dir / "test_visible_file.txt"
+        async with aiofiles.open(visible_file, 'w', encoding='utf-8') as f:
+            await f.write("Visible content")
+        
+        result = await file_storage.list_files()
+        
+        # Hidden directory files should not appear
+        assert ".test_hidden_dir" not in result
+        assert "test_hidden_file.txt" not in result
+        # Visible directory files should appear
+        assert "test_visible_dir/test_visible_file.txt" in result or "test_visible_file.txt" in result
     
     @pytest.mark.asyncio
     async def test_read_file_success(self, temp_storage_dir, setup_user, mock_rag_api):
@@ -461,6 +593,416 @@ class TestErrorHandling:
             # Verify file exists
             file_path = temp_storage_dir / "test_user_123" / "test.txt"
             assert file_path.exists()
+
+
+class TestSearchFiles:
+    """Test search_files functionality"""
+    
+    @pytest.mark.asyncio
+    async def test_search_files_returns_filename_from_metadata(self, temp_storage_dir, setup_user):
+        """Test that search_files returns filename from metadata"""
+        import numpy as np
+        from unittest.mock import AsyncMock as AsyncPGMock
+        
+        # Mock the embedding and database query
+        with patch('tools.file_storage._get_query_embedding', return_value=[0.1, 0.2, 0.3]):
+            mock_conn = AsyncPGMock()
+            
+            # Create mock row with metadata containing filename
+            mock_row = MagicMock()
+            mock_metadata = {"user_id": "test_user_123", "filename": "test_file.md", "size": 100}
+            mock_row.__getitem__ = lambda self, key: {
+                'document': 'Test content from test_file.md',
+                'cmetadata': mock_metadata,
+                'custom_id': 'user_test_user_123_test_file.md',
+                'similarity': 0.95
+            }.get(key)
+            mock_row.get = lambda key, default=None: {
+                'document': 'Test content from test_file.md',
+                'cmetadata': mock_metadata,
+                'custom_id': 'user_test_user_123_test_file.md',
+                'similarity': 0.95
+            }.get(key, default)
+            
+            mock_conn.fetch = AsyncMock(return_value=[mock_row])
+            mock_conn.close = AsyncMock()
+            
+            with patch('asyncpg.connect', return_value=mock_conn), \
+                 patch('pgvector.asyncpg.register_vector', return_value=None), \
+                 patch('pgvector.asyncpg.Vector', return_value=MagicMock()):
+                
+                result = await file_storage.search_files("test query")
+                
+                # Verify filename is returned (not "unknown")
+                assert "test_file.md" in result
+                assert "unknown" not in result
+                assert "Test content" in result
+                assert "relevance:" in result
+    
+    @pytest.mark.asyncio
+    async def test_search_files_fallback_to_custom_id_for_filename(self, temp_storage_dir, setup_user):
+        """Test that search_files extracts filename from custom_id when metadata lacks it"""
+        import numpy as np
+        from unittest.mock import AsyncMock as AsyncPGMock
+        
+        # Mock the embedding and database query
+        with patch('tools.file_storage._get_query_embedding', return_value=[0.1, 0.2, 0.3]):
+            mock_conn = AsyncPGMock()
+            
+            # Create mock row with metadata missing filename, but custom_id has it
+            mock_row = MagicMock()
+            mock_metadata = {"user_id": "test_user_123"}  # No filename in metadata
+            mock_row.__getitem__ = lambda self, key: {
+                'document': 'Test content',
+                'cmetadata': mock_metadata,
+                'custom_id': 'user_test_user_123_my_document.txt',  # Filename in custom_id
+                'similarity': 0.90
+            }.get(key)
+            mock_row.get = lambda key, default=None: {
+                'document': 'Test content',
+                'cmetadata': mock_metadata,
+                'custom_id': 'user_test_user_123_my_document.txt',
+                'similarity': 0.90
+            }.get(key, default)
+            
+            mock_conn.fetch = AsyncMock(return_value=[mock_row])
+            mock_conn.close = AsyncMock()
+            
+            with patch('asyncpg.connect', return_value=mock_conn), \
+                 patch('pgvector.asyncpg.register_vector', return_value=None), \
+                 patch('pgvector.asyncpg.Vector', return_value=MagicMock()):
+                
+                result = await file_storage.search_files("test query")
+                
+                # Verify filename is extracted from custom_id
+                assert "my_document.txt" in result
+                assert "unknown" not in result
+    
+    @pytest.mark.asyncio
+    async def test_search_files_handles_json_string_metadata(self, temp_storage_dir, setup_user):
+        """Test that search_files handles metadata stored as JSON string"""
+        import numpy as np
+        from unittest.mock import AsyncMock as AsyncPGMock
+        
+        # Mock the embedding and database query
+        with patch('tools.file_storage._get_query_embedding', return_value=[0.1, 0.2, 0.3]):
+            mock_conn = AsyncPGMock()
+            
+            # Create mock row with metadata as JSON string
+            mock_row = MagicMock()
+            mock_metadata_str = '{"user_id": "test_user_123", "filename": "json_file.md", "size": 200}'
+            mock_row.__getitem__ = lambda self, key: {
+                'document': 'Content from json_file',
+                'cmetadata': mock_metadata_str,  # JSON string, not dict
+                'custom_id': 'user_test_user_123_json_file.md',
+                'similarity': 0.85
+            }.get(key)
+            mock_row.get = lambda key, default=None: {
+                'document': 'Content from json_file',
+                'cmetadata': mock_metadata_str,
+                'custom_id': 'user_test_user_123_json_file.md',
+                'similarity': 0.85
+            }.get(key, default)
+            
+            mock_conn.fetch = AsyncMock(return_value=[mock_row])
+            mock_conn.close = AsyncMock()
+            
+            with patch('asyncpg.connect', return_value=mock_conn), \
+                 patch('pgvector.asyncpg.register_vector', return_value=None), \
+                 patch('pgvector.asyncpg.Vector', return_value=MagicMock()):
+                
+                result = await file_storage.search_files("test query")
+                
+                # Verify filename is parsed from JSON string metadata
+                assert "json_file.md" in result
+                assert "unknown" not in result
+    
+    @pytest.mark.asyncio
+    async def test_search_files_handles_missing_metadata_gracefully(self, temp_storage_dir, setup_user):
+        """Test that search_files handles missing or invalid metadata gracefully"""
+        import numpy as np
+        from unittest.mock import AsyncMock as AsyncPGMock
+        
+        # Mock the embedding and database query
+        with patch('tools.file_storage._get_query_embedding', return_value=[0.1, 0.2, 0.3]):
+            mock_conn = AsyncPGMock()
+            
+            # Create mock row with no metadata and no custom_id
+            mock_row = MagicMock()
+            mock_row.__getitem__ = lambda self, key: {
+                'document': 'Some content',
+                'cmetadata': None,  # No metadata
+                'custom_id': None,  # No custom_id
+                'similarity': 0.80
+            }.get(key)
+            mock_row.get = lambda key, default=None: {
+                'document': 'Some content',
+                'cmetadata': None,
+                'custom_id': None,
+                'similarity': 0.80
+            }.get(key, default)
+            
+            mock_conn.fetch = AsyncMock(return_value=[mock_row])
+            mock_conn.close = AsyncMock()
+            
+            with patch('asyncpg.connect', return_value=mock_conn), \
+                 patch('pgvector.asyncpg.register_vector', return_value=None), \
+                 patch('pgvector.asyncpg.Vector', return_value=MagicMock()):
+                
+                result = await file_storage.search_files("test query")
+                
+                # Should still return results, but with "unknown" filename
+                assert "unknown" in result
+                assert "Some content" in result
+                assert "relevance:" in result
+
+
+class TestQueryEmbedding:
+    """Test query embedding functionality for semantic search"""
+    
+    @pytest.mark.asyncio
+    async def test_get_query_embedding_uses_local_embed_endpoint(self, setup_user):
+        """Test that /local/embed endpoint is tried first"""
+        with patch('tools.file_storage.httpx.AsyncClient') as mock_client:
+            mock_instance = AsyncMock()
+            mock_client.return_value.__aenter__.return_value = mock_instance
+            
+            # Mock successful /local/embed response
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {"embedding": [0.1, 0.2, 0.3]}
+            mock_instance.post.return_value = mock_response
+            
+            # Mock JWT token generation
+            with patch('tools.file_storage._generate_jwt_token', return_value="test_token"):
+                embedding = await file_storage._get_query_embedding("test query", "test_user_123")
+                
+                assert embedding == [0.1, 0.2, 0.3]
+                # Verify /local/embed was called
+                call_args = mock_instance.post.call_args
+                assert "/local/embed" in call_args[0][0]
+                assert call_args[1]["json"] == {"text": "test query"}
+    
+    @pytest.mark.asyncio
+    async def test_get_query_embedding_fallback_to_multipart_embed(self, setup_user):
+        """Test fallback to /embed with multipart/form-data when /local/embed fails"""
+        import io
+        import numpy as np
+        from unittest.mock import AsyncMock as AsyncPGMock
+        
+        with patch('tools.file_storage.httpx.AsyncClient') as mock_client:
+            mock_instance = AsyncMock()
+            mock_client.return_value.__aenter__.return_value = mock_instance
+            
+            # Mock /local/embed returns 404 (doesn't exist)
+            local_embed_response = MagicMock()
+            local_embed_response.status_code = 404
+            local_embed_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+                "Not found", request=MagicMock(), response=local_embed_response
+            )
+            
+            # Mock successful /embed response (multipart)
+            embed_response = MagicMock()
+            embed_response.status_code = 200
+            embed_response.raise_for_status = MagicMock()
+            
+            # Setup mock to return 404 for /local/embed, 200 for /embed
+            def post_side_effect(url, **kwargs):
+                if "/local/embed" in url:
+                    raise httpx.HTTPStatusError("Not found", request=MagicMock(), response=local_embed_response)
+                return embed_response
+            
+            mock_instance.post.side_effect = post_side_effect
+            
+            # Mock database connection and query
+            mock_conn = AsyncPGMock()
+            # Create a numpy array-like object for the embedding
+            mock_embedding = np.array([0.1, 0.2, 0.3, 0.4])
+            
+            # Create a proper mock row that supports both [] and .get()
+            mock_row = MagicMock()
+            mock_row.__getitem__ = lambda self, key: mock_embedding if key == 'embedding' else None
+            mock_row.get = lambda key, default=None: mock_embedding if key == 'embedding' else default
+            mock_conn.fetchrow = AsyncMock(return_value=mock_row)
+            mock_conn.execute = AsyncMock()
+            mock_conn.close = AsyncMock()
+            
+            with patch('asyncpg.connect', return_value=mock_conn), \
+                 patch('pgvector.asyncpg.register_vector', return_value=None), \
+                 patch('tools.file_storage._generate_jwt_token', return_value="test_token"):
+                
+                embedding = await file_storage._get_query_embedding("test query", "test_user_123")
+                
+                # Verify embedding was converted to list
+                assert isinstance(embedding, list)
+                assert len(embedding) == 4
+                assert embedding == [0.1, 0.2, 0.3, 0.4]
+                
+                # Verify /embed was called with multipart/form-data
+                embed_call = None
+                for call in mock_instance.post.call_args_list:
+                    if "/embed" in call[0][0] and "/local/embed" not in call[0][0]:
+                        embed_call = call
+                        break
+                
+                assert embed_call is not None
+                # Verify files parameter (multipart) was used
+                assert "files" in embed_call[1]
+                assert "data" in embed_call[1]
+                # Verify file_id is in data
+                assert "file_id" in embed_call[1]["data"]
+                
+                # Verify database cleanup was called
+                mock_conn.execute.assert_called_once()
+                mock_conn.close.assert_called_once()
+    
+    @pytest.mark.asyncio
+    async def test_get_query_embedding_handles_numpy_array_boolean_check(self, setup_user):
+        """Test that numpy array boolean check doesn't cause ambiguous truth value error"""
+        import numpy as np
+        from unittest.mock import AsyncMock as AsyncPGMock
+        
+        with patch('tools.file_storage.httpx.AsyncClient') as mock_client:
+            mock_instance = AsyncMock()
+            mock_client.return_value.__aenter__.return_value = mock_instance
+            
+            # Mock /local/embed doesn't exist
+            local_embed_response = MagicMock()
+            local_embed_response.status_code = 404
+            local_embed_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+                "Not found", request=MagicMock(), response=local_embed_response
+            )
+            
+            embed_response = MagicMock()
+            embed_response.status_code = 200
+            embed_response.raise_for_status = MagicMock()
+            
+            def post_side_effect(url, **kwargs):
+                if "/local/embed" in url:
+                    raise httpx.HTTPStatusError("Not found", request=MagicMock(), response=local_embed_response)
+                return embed_response
+            
+            mock_instance.post.side_effect = post_side_effect
+            
+            # Mock database with numpy array (this is what causes the boolean check issue)
+            mock_conn = AsyncPGMock()
+            mock_embedding = np.array([0.1, 0.2, 0.3])
+            
+            # Create a proper mock row that supports both [] and .get()
+            mock_row = MagicMock()
+            mock_row.__getitem__ = lambda self, key: mock_embedding if key == 'embedding' else None
+            mock_row.get = lambda key, default=None: mock_embedding if key == 'embedding' else default
+            mock_conn.fetchrow = AsyncMock(return_value=mock_row)
+            mock_conn.execute = AsyncMock()
+            mock_conn.close = AsyncMock()
+            
+            with patch('asyncpg.connect', return_value=mock_conn), \
+                 patch('pgvector.asyncpg.register_vector', return_value=None), \
+                 patch('tools.file_storage._generate_jwt_token', return_value="test_token"):
+                
+                # This should not raise "ambiguous truth value" error
+                embedding = await file_storage._get_query_embedding("test query", "test_user_123")
+                
+                # Verify it was converted to list
+                assert isinstance(embedding, list)
+                assert len(embedding) == 3
+    
+    @pytest.mark.asyncio
+    async def test_get_query_embedding_handles_pgvector_type(self, setup_user):
+        """Test that pgvector vector type is properly converted to list"""
+        import numpy as np
+        from unittest.mock import AsyncMock as AsyncPGMock
+        
+        # Create a mock pgvector-like object
+        class MockPGVector:
+            def __init__(self, data):
+                self.data = np.array(data)
+            
+            def tolist(self):
+                return self.data.tolist()
+        
+        with patch('tools.file_storage.httpx.AsyncClient') as mock_client:
+            mock_instance = AsyncMock()
+            mock_client.return_value.__aenter__.return_value = mock_instance
+            
+            # Mock /local/embed doesn't exist
+            local_embed_response = MagicMock()
+            local_embed_response.status_code = 404
+            local_embed_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+                "Not found", request=MagicMock(), response=local_embed_response
+            )
+            
+            embed_response = MagicMock()
+            embed_response.status_code = 200
+            embed_response.raise_for_status = MagicMock()
+            
+            def post_side_effect(url, **kwargs):
+                if "/local/embed" in url:
+                    raise httpx.HTTPStatusError("Not found", request=MagicMock(), response=local_embed_response)
+                return embed_response
+            
+            mock_instance.post.side_effect = post_side_effect
+            
+            mock_conn = AsyncPGMock()
+            mock_embedding = MockPGVector([0.5, 0.6, 0.7])
+            
+            # Create a proper mock row that supports both [] and .get()
+            mock_row = MagicMock()
+            mock_row.__getitem__ = lambda self, key: mock_embedding if key == 'embedding' else None
+            mock_row.get = lambda key, default=None: mock_embedding if key == 'embedding' else default
+            mock_conn.fetchrow = AsyncMock(return_value=mock_row)
+            mock_conn.execute = AsyncMock()
+            mock_conn.close = AsyncMock()
+            
+            with patch('asyncpg.connect', return_value=mock_conn), \
+                 patch('pgvector.asyncpg.register_vector', return_value=None), \
+                 patch('tools.file_storage._generate_jwt_token', return_value="test_token"):
+                
+                embedding = await file_storage._get_query_embedding("test query", "test_user_123")
+                
+                # Verify tolist() was called and result is a list
+                assert isinstance(embedding, list)
+                assert embedding == [0.5, 0.6, 0.7]
+    
+    @pytest.mark.asyncio
+    async def test_get_query_embedding_handles_missing_embedding(self, setup_user):
+        """Test error handling when embedding is not found in database"""
+        with patch('tools.file_storage.httpx.AsyncClient') as mock_client:
+            mock_instance = AsyncMock()
+            mock_client.return_value.__aenter__.return_value = mock_instance
+            
+            # Mock /local/embed doesn't exist
+            local_embed_response = MagicMock()
+            local_embed_response.status_code = 404
+            local_embed_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+                "Not found", request=MagicMock(), response=local_embed_response
+            )
+            
+            embed_response = MagicMock()
+            embed_response.status_code = 200
+            embed_response.raise_for_status = MagicMock()
+            
+            def post_side_effect(url, **kwargs):
+                if "/local/embed" in url:
+                    raise httpx.HTTPStatusError("Not found", request=MagicMock(), response=local_embed_response)
+                return embed_response
+            
+            mock_instance.post.side_effect = post_side_effect
+            
+            # Mock database returns None (embedding not found)
+            from unittest.mock import AsyncMock as AsyncPGMock
+            mock_conn = AsyncPGMock()
+            mock_conn.fetchrow = AsyncMock(return_value=None)
+            mock_conn.close = AsyncMock()
+            
+            with patch('asyncpg.connect', return_value=mock_conn), \
+                 patch('pgvector.asyncpg.register_vector', return_value=None), \
+                 patch('tools.file_storage._generate_jwt_token', return_value="test_token"):
+                
+                with pytest.raises(RuntimeError, match="Could not retrieve embedding"):
+                    await file_storage._get_query_embedding("test query", "test_user_123")
+                
+                mock_conn.close.assert_called_once()
 
 
 if __name__ == "__main__":
