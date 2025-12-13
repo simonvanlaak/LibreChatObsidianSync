@@ -29,6 +29,13 @@ RAG_API_JWT_SECRET = os.environ.get("RAG_API_JWT_SECRET", os.environ.get("JWT_SE
 CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "1500"))
 CHUNK_OVERLAP = int(os.environ.get("CHUNK_OVERLAP", "100"))
 
+# VectorDB configuration
+VECTORDB_HOST = os.environ.get("VECTORDB_HOST", "vectordb")
+VECTORDB_PORT = int(os.environ.get("VECTORDB_PORT", "5432"))
+VECTORDB_DB = os.environ.get("VECTORDB_DB", "mydatabase")
+VECTORDB_USER = os.environ.get("VECTORDB_USER", "myuser")
+VECTORDB_PASSWORD = os.environ.get("VECTORDB_PASSWORD", "mypassword")
+
 
 def get_file_id(user_id: str, filename: str) -> str:
     """Generate a unique file ID for vectordb scoping"""
@@ -466,12 +473,178 @@ async def delete_file(filename: str) -> str:
     return f"Successfully deleted '{filename}'"
 
 
+async def _get_query_embedding(query: str, user_id: str) -> list:
+    """
+    Get embedding vector for query text from RAG API.
+    
+    Uses RAG API's /local/embed endpoint if available, otherwise falls back to
+    embedding as a temporary document and extracting from database.
+    
+    Args:
+        query: Query text to embed
+        user_id: User ID for authentication
+        
+    Returns:
+        List of floats representing the embedding vector
+    """
+    token = _generate_jwt_token(user_id)
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            # Try /local/embed endpoint first (if it exists and doesn't store embeddings)
+            try:
+                response = await client.post(
+                    f"{RAG_API_URL}/local/embed",
+                    json={"text": query},
+                    headers=headers
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    if isinstance(data, dict) and "embedding" in data:
+                        return data["embedding"]
+                    elif isinstance(data, list):
+                        return data
+            except (httpx.HTTPStatusError, httpx.RequestError):
+                # /local/embed doesn't exist or failed, fall back to database method
+                pass
+            
+            # Fallback: Embed as temporary document and extract from database
+            temp_file_id = f"temp_query_{user_id}_{int(datetime.now().timestamp())}"
+            
+            # Embed the query text
+            embed_response = await client.post(
+                f"{RAG_API_URL}/embed",
+                json={
+                    "file_id": temp_file_id,
+                    "content": query,
+                    "metadata": {"user_id": user_id, "filename": "query.txt"}
+                },
+                headers=headers
+            )
+            embed_response.raise_for_status()
+            
+            # Now query the database to get the embedding vector we just created
+            import asyncpg
+            from pgvector.asyncpg import register_vector
+            
+            conn = await asyncpg.connect(
+                host=VECTORDB_HOST,
+                port=VECTORDB_PORT,
+                database=VECTORDB_DB,
+                user=VECTORDB_USER,
+                password=VECTORDB_PASSWORD
+            )
+            await register_vector(conn)
+            
+            # Get the embedding we just created
+            row = await conn.fetchrow(
+                "SELECT embedding FROM langchain_pg_embedding WHERE custom_id = $1 LIMIT 1",
+                temp_file_id
+            )
+            
+            if row and row['embedding']:
+                embedding = row['embedding']
+                # Convert pgvector vector to list
+                embedding_list = embedding.tolist() if hasattr(embedding, 'tolist') else list(embedding)
+                
+                # Clean up temporary embedding
+                await conn.execute(
+                    "DELETE FROM langchain_pg_embedding WHERE custom_id = $1",
+                    temp_file_id
+                )
+                await conn.close()
+                
+                return embedding_list
+            else:
+                await conn.close()
+                raise RuntimeError("Could not retrieve embedding from database")
+            
+    except httpx.HTTPStatusError as e:
+        raise RuntimeError(f"Failed to get query embedding from RAG API: {e}")
+    except Exception as e:
+        raise RuntimeError(f"Failed to get query embedding: {e}")
+
+
+async def _query_vectordb_direct(query_embedding: list, user_id: str, max_results: int = 5) -> List[Dict]:
+    """
+    Query vectordb directly using pgvector for semantic search across all user files.
+    
+    Args:
+        query_embedding: Embedding vector for the query
+        user_id: User ID to filter results
+        max_results: Maximum number of results to return
+        
+    Returns:
+        List of result dictionaries with content, distance, and metadata
+    """
+    try:
+        import asyncpg
+        from pgvector.asyncpg import register_vector
+    except ImportError:
+        raise RuntimeError("asyncpg and pgvector are required for direct vectordb queries. Install with: pip install asyncpg pgvector")
+    
+    try:
+        # Connect to PostgreSQL
+        conn = await asyncpg.connect(
+            host=VECTORDB_HOST,
+            port=VECTORDB_PORT,
+            database=VECTORDB_DB,
+            user=VECTORDB_USER,
+            password=VECTORDB_PASSWORD
+        )
+        
+        # Register pgvector type
+        await register_vector(conn)
+        
+        # Convert embedding list to pgvector format
+        from pgvector.asyncpg import Vector
+        query_vector = Vector(query_embedding)
+        
+        # Query using pgvector cosine distance
+        # Table name is typically langchain_pg_embedding based on docs
+        # Filter by user_id in metadata JSONB field
+        # <=> operator is cosine distance (lower is better)
+        query_sql = """
+            SELECT 
+                document,
+                cmetadata,
+                1 - (embedding <=> $1::vector) as similarity
+            FROM langchain_pg_embedding
+            WHERE cmetadata->>'user_id' = $2
+            ORDER BY embedding <=> $1::vector
+            LIMIT $3
+        """
+        
+        rows = await conn.fetch(query_sql, query_vector, user_id, max_results)
+        
+        results = []
+        for row in rows:
+            metadata = row['cmetadata'] if row['cmetadata'] else {}
+            results.append({
+                "content": row['document'] or "",
+                "distance": 1.0 - float(row['similarity']),  # Convert similarity to distance
+                "metadata": metadata if isinstance(metadata, dict) else {}
+            })
+        
+        await conn.close()
+        return results
+        
+    except Exception as e:
+        raise RuntimeError(f"Failed to query vectordb directly: {e}")
+
+
 async def search_files(query: str, max_results: int = 5) -> str:
     """
-    Search user's files using semantic search via RAG API.
+    Search user's files using semantic search by querying vectordb directly.
     
-    Follows LibreChat's file search pattern: queries each file individually
-    and combines results, matching the format used in LibreChat's fileSearch.js.
+    This bypasses the RAG API's /query endpoint limitation (requires file_id)
+    and queries all user files at once using pgvector similarity search.
     
     Args:
         query: Search query text
@@ -481,143 +654,33 @@ async def search_files(query: str, max_results: int = 5) -> str:
         Search results with relevant excerpts
     """
     user_id = get_current_user()
-    user_dir = get_user_storage_path(user_id)
     
-    # Get all markdown files for the user (from vault and root)
-    files_to_search = []
-    vault_path = user_dir / "obsidian_vault"
-    
-    # Collect markdown files from vault
-    # IMPORTANT: Use only filename (not path) for file_id to match Worker's indexing format
-    # Worker uses: get_file_id(user_id, filename) where filename is just the basename
-    if vault_path.exists():
-        for file_path in vault_path.rglob("*.md"):
-            if file_path.is_file():
-                relative_path = file_path.relative_to(user_dir)
-                # Use only filename (not full path) to match Worker's file_id format
-                files_to_search.append({
-                    "file_id": get_file_id(user_id, file_path.name),  # Just filename, not path
-                    "filename": file_path.name,
-                    "path": str(relative_path)
-                })
-    
-    # Also check root directory for markdown files
-    for file_path in user_dir.glob("*.md"):
-        if file_path.is_file():
-            files_to_search.append({
-                "file_id": get_file_id(user_id, file_path.name),
-                "filename": file_path.name,
-                "path": file_path.name
-            })
-    
-    if not files_to_search:
-        return f"No markdown files found to search for query: '{query}'"
-    
-    # Generate JWT token for authentication
-    token = _generate_jwt_token(user_id)
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json"
-    }
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    
-    # Query each file individually (matching LibreChat's pattern)
-    all_results = []
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        query_tasks = []
-        for file_info in files_to_search:
-            # Use same format as LibreChat: file_id, query, k
-            query_tasks.append(
-                client.post(
-                    f"{RAG_API_URL}/query",
-                    json={
-                        "file_id": file_info["file_id"],
-                        "query": query,
-                        "k": max_results  # Query more per file, then we'll limit total
-                    },
-                    headers=headers
-                )
-            )
+    try:
+        # Step 1: Get embedding for the query text from RAG API
+        query_embedding = await _get_query_embedding(query, user_id)
         
-        # Execute all queries in parallel
-        responses = await asyncio.gather(*query_tasks, return_exceptions=True)
+        # Step 2: Query vectordb directly using pgvector
+        results = await _query_vectordb_direct(query_embedding, user_id, max_results)
         
-        # Process responses (matching LibreChat's fileSearch.js pattern)
-        for i, response in enumerate(responses):
-            if isinstance(response, Exception):
-                # Log but continue with other files
-                continue
-            
-            try:
-                response.raise_for_status()
-                # In httpx, response.json() returns the JSON body directly
-                # LibreChat's axios returns result.data which is the same
-                data = response.json()
-                
-                # LibreChat's RAG API returns: array of [docInfo, distance] tuples
-                # Format: [[{page_content, metadata}, distance], ...]
-                # See fileSearch.js line 130: result.data.map(([docInfo, distance]) => ...)
-                if isinstance(data, list):
-                    for item in data:
-                        if isinstance(item, list) and len(item) == 2:
-                            doc_info, distance = item
-                            # Extract content and metadata (matching LibreChat's structure)
-                            page_content = doc_info.get("page_content") or doc_info.get("text", "")
-                            metadata = doc_info.get("metadata", {})
-                            
-                            all_results.append({
-                                "filename": files_to_search[i]["filename"],
-                                "path": files_to_search[i]["path"],
-                                "content": page_content,
-                                "distance": distance,
-                                "metadata": metadata,
-                                "file_id": files_to_search[i]["file_id"]
-                            })
-                # Fallback: handle other response formats
-                elif isinstance(data, dict):
-                    # Try results array
-                    if "results" in data:
-                        for result in data["results"]:
-                            all_results.append({
-                                "filename": files_to_search[i]["filename"],
-                                "path": files_to_search[i]["path"],
-                                "content": result.get("text", result.get("page_content", "")),
-                                "distance": result.get("distance", 1.0 - result.get("score", 0.0)),
-                                "metadata": result.get("metadata", {}),
-                                "file_id": files_to_search[i]["file_id"]
-                            })
-            except httpx.HTTPStatusError as e:
-                # Log detailed error for debugging
-                if e.response.status_code == 422:
-                    error_detail = e.response.text
-                    print(f"Warning: 422 error querying file {files_to_search[i]['file_id']}: {error_detail}")
-                # Continue with other files
-                continue
-            except Exception as e:
-                # Log but continue with other files
-                print(f"Warning: Error querying file {files_to_search[i]['file_id']}: {e}")
-                continue
+    except Exception as e:
+        raise RuntimeError(f"Failed to search files: {e}")
     
-    if not all_results:
+    if not results:
         return f"No results found for query: '{query}'"
     
     # Sort by distance (lower is better) and limit results
-    all_results.sort(key=lambda x: x["distance"])
-    top_results = all_results[:max_results]
+    results.sort(key=lambda x: x["distance"])
+    top_results = results[:max_results]
     
     # Format results
     output = f"Found {len(top_results)} result(s) for '{query}':\n\n"
     for i, result in enumerate(top_results, 1):
         relevance = 1.0 - result["distance"]  # Convert distance to relevance score
-        excerpt = result["content"][:200]  # First 200 chars
-        filename = result["filename"]
-        path = result["path"]
+        excerpt = result["content"][:200] if result["content"] else ""  # First 200 chars
+        metadata = result.get("metadata", {})
+        filename = metadata.get("filename", "unknown")
         
-        output += f"{i}. {filename}"
-        if path != filename:
-            output += f" ({path})"
-        output += f" (relevance: {relevance:.3f})\n"
+        output += f"{i}. {filename} (relevance: {relevance:.3f})\n"
         output += f"   {excerpt}...\n\n"
     
     return output
