@@ -80,7 +80,7 @@ class IndexingManager:
             
             # Remove each hidden directory file from RAG API
             if hidden_files:
-                logger.info(f"Cleaning up {len(hidden_files)} file(s) from hidden directories in RAG API for user {self.user_id}")
+                logger.debug(f"Cleaning up {len(hidden_files)} file(s) from hidden directories in RAG API for user {self.user_id}")
                 import urllib.parse
                 
                 for file_id, file_path in hidden_files:
@@ -92,7 +92,7 @@ class IndexingManager:
                             timeout=10.0
                         )
                         if response.status_code in [200, 204]:
-                            logger.info(f"Removed hidden directory file from RAG API: {file_path} (file_id: {file_id})")
+                            logger.debug(f"Removed hidden directory file from RAG API: {file_path} (file_id: {file_id})")
                         elif response.status_code == 404:
                             logger.debug(f"Hidden directory file not found in RAG API (already removed): {file_path}")
                         else:
@@ -211,7 +211,7 @@ class IndexingManager:
                         logger.error(f"422 error for {filename}: {response.text[:200]}")
                 
                 response.raise_for_status()
-                logger.info(f"Indexed {filename} for user {self.user_id}")
+                logger.debug(f"Indexed {filename} for user {self.user_id}")
                 return True
                 
             except (httpx.ConnectError, httpx.TimeoutException, ConnectionRefusedError) as e:
@@ -274,11 +274,11 @@ class GitSync:
             repo = self._ensure_repo()
             
             # 1. Pull latest changes
-            logger.info(f"Pulling {self.user_id}...")
+            logger.debug(f"Pulling {self.user_id}...")
             try:
                 repo.remotes.origin.pull(self.branch)
             except Exception as e:
-                logger.warning(f"Pull failed (might be conflict or empty): {e}")
+                logger.warning(f"Pull failed for {self.user_id}: {e}")
                 raise  # Re-raise to count as failure
 
             # 2. Index changes (LIFO by modification time)
@@ -286,7 +286,7 @@ class GitSync:
 
             # 3. Push local changes (made by MCP tools)
             if repo.is_dirty(untracked_files=True):
-                logger.info(f"Pushing changes for {self.user_id}...")
+                logger.debug(f"Pushing changes for {self.user_id}...")
                 repo.git.add(A=True)
                 repo.index.commit(f"Sync from LibreChat: {datetime.utcnow().isoformat()}")
                 repo.remotes.origin.push(self.branch)
@@ -363,7 +363,7 @@ class GitSync:
         files_to_index = changed_files[:MAX_FILES_PER_CYCLE]
         
         if len(changed_files) > MAX_FILES_PER_CYCLE:
-            logger.info(
+            logger.debug(
                 f"Throttling: {len(changed_files)} changed files found, "
                 f"indexing only {MAX_FILES_PER_CYCLE} most recent (LIFO) for user {self.user_id}"
             )
@@ -384,7 +384,7 @@ class GitSync:
                 # Continue with next file even if one fails
         
         if indexed_count > 0:
-            logger.info(f"Indexed {indexed_count} file(s) for user {self.user_id} (LIFO order)")
+            logger.debug(f"Indexed {indexed_count} file(s) for user {self.user_id}")
 
     def _has_changed(self, file_path: Path) -> bool:
         """Check against local hash DB if file changed."""
@@ -447,11 +447,22 @@ class SyncManager:
                 config = json.load(f)
             
             if success:
+                # Check if sync was previously stopped and is now resuming
+                was_stopped = config.get('stopped', False)
+                had_failures = config.get('failure_count', 0) > 0
+                
                 # Reset failure count on success
                 config['failure_count'] = 0
                 config['last_success'] = datetime.utcnow().isoformat()
                 config['stopped'] = False
                 config.pop('last_failure', None)  # Remove last_failure on success
+                
+                # Log if sync resumed after being stopped
+                if was_stopped:
+                    logger.info(f"Sync resumed for user {user_id} after reset")
+                # Log if this is first successful sync after failures (but not stopped)
+                elif had_failures:
+                    logger.info(f"Sync recovered for user {user_id} (previous failures cleared)")
             else:
                 # Increment failure count
                 current_failures = config.get('failure_count', 0) + 1
@@ -462,7 +473,7 @@ class SyncManager:
                 # Stop if max failures reached
                 if current_failures >= self.MAX_FAILURES:
                     config['stopped'] = True
-                    logger.warning(f"Sync stopped for user {user_id} after {current_failures} failures")
+                    logger.error(f"SYNC STOPPED for user {user_id} after {current_failures} consecutive failures. Last error: {str(error) if error else 'Unknown'}")
             
             # Atomic write
             temp_path = config_path.with_suffix('.json.tmp')
@@ -475,7 +486,6 @@ class SyncManager:
 
     def process_cycle(self):
         """Run one sync cycle across all users."""
-        logger.info("Starting sync cycle...")
         # Scan for users
         if not STORAGE_ROOT.exists():
             logger.warning(f"Storage root {STORAGE_ROOT} does not exist.")
@@ -497,10 +507,9 @@ class SyncManager:
                         # Check if sync is stopped due to failures
                         if config.get('stopped', False):
                             skipped_count += 1
-                            logger.info(f"Skipping user {user_id} - sync stopped after {config.get('failure_count', 0)} failures")
+                            # Only log once per cycle if there are stopped syncs
                             continue
                         
-                        logger.info(f"Processing user: {user_id}")
                         syncer = GitSync(user_id, config)
                         syncer.sync()
                         
@@ -508,11 +517,9 @@ class SyncManager:
                         self._update_sync_status(user_id, success=True)
                         
                     except Exception as e:
-                        logger.error(f"Error processing user {user_dir.name}: {e}")
+                        logger.error(f"Sync failed for user {user_dir.name}: {e}")
                         # Mark as failed
                         self._update_sync_status(user_dir.name, success=False, error=str(e))
-        
-        logger.info(f"Sync cycle completed. Found {user_count} user config(s), skipped {skipped_count} stopped sync(s).")
 
 
 def main():
