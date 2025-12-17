@@ -207,8 +207,13 @@ async def upload_file(filename: str, content: str) -> str:
         
         # Create multipart form data
         # httpx expects files as tuple: (filename, file-like object, content_type)
+        # Use only the basename for the file field to avoid RAG API directory creation issues
+        # The full path is preserved in metadata
+        file_content = io.BytesIO(content.encode('utf-8'))
+        file_content.seek(0)  # Ensure we're at the beginning
+        file_basename = Path(filename).name  # Extract just the filename, not the path
         files = {
-            'file': (filename, io.BytesIO(content.encode('utf-8')), 'text/markdown')
+            'file': (file_basename, file_content, 'text/markdown')
         }
         data = {
             'file_id': file_id
@@ -229,7 +234,28 @@ async def upload_file(filename: str, content: str) -> str:
                 headers=multipart_headers,
                 timeout=30.0
             )
+            
+            # Log response details for debugging errors
+            if response.status_code >= 400:
+                try:
+                    error_detail = response.json()
+                    print(f"RAG API error details for {filename}: {error_detail}")
+                except:
+                    print(f"RAG API error for {filename} (status {response.status_code}): {response.text[:500]}")
+            
             response.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        # Clean up file if indexing failed
+        file_path.unlink()
+        # Include response details in error message
+        error_msg = f"Failed to index file in RAG API: {e}"
+        if e.response is not None:
+            try:
+                error_detail = e.response.json()
+                error_msg += f" - Details: {error_detail}"
+            except:
+                error_msg += f" - Response: {e.response.text[:500]}"
+        raise RuntimeError(error_msg)
     except Exception as e:
         # Clean up file if indexing failed
         file_path.unlink()
@@ -401,8 +427,13 @@ async def modify_file(filename: str, content: str) -> str:
             
             # Create new embeddings using multipart/form-data
             # httpx expects files as tuple: (filename, file-like object, content_type)
+            # Use only the basename for the file field to avoid RAG API directory creation issues
+            # The full path is preserved in metadata
+            file_content = io.BytesIO(content.encode('utf-8'))
+            file_content.seek(0)  # Ensure we're at the beginning
+            file_basename = Path(filename).name  # Extract just the filename, not the path
             files = {
-                'file': (filename, io.BytesIO(content.encode('utf-8')), 'text/markdown')
+                'file': (file_basename, file_content, 'text/markdown')
             }
             data = {
                 'file_id': file_id
@@ -422,7 +453,26 @@ async def modify_file(filename: str, content: str) -> str:
                 headers=multipart_headers,
                 timeout=30.0
             )
+            
+            # Log response details for debugging errors
+            if response.status_code >= 400:
+                try:
+                    error_detail = response.json()
+                    print(f"RAG API error details for {filename}: {error_detail}")
+                except:
+                    print(f"RAG API error for {filename} (status {response.status_code}): {response.text[:500]}")
+            
             response.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        # Include response details in error message
+        error_msg = f"Failed to re-index file in RAG API: {e}"
+        if e.response is not None:
+            try:
+                error_detail = e.response.json()
+                error_msg += f" - Details: {error_detail}"
+            except:
+                error_msg += f" - Response: {e.response.text[:500]}"
+        raise RuntimeError(error_msg)
     except Exception as e:
         raise RuntimeError(f"Failed to re-index file in RAG API: {e}")
     
