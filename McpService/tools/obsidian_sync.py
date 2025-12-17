@@ -9,6 +9,8 @@ import json
 import aiofiles
 import os
 import sys
+import re
+import subprocess
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
@@ -16,6 +18,98 @@ from typing import Optional
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from shared.storage import get_current_user, get_user_storage_path, get_obsidian_headers
+
+# Configuration - matches Worker/main.py
+STORAGE_ROOT = Path(os.environ.get("STORAGE_ROOT", "/storage"))
+
+def clean_remote_url(url: str) -> str:
+    """
+    Remove authentication tokens from a Git remote URL.
+    Example: https://token@github.com/user/repo -> https://github.com/user/repo
+    """
+    if not url:
+        return url
+    # Matches http(s)://token@... or http(s)://user:password@...
+    cleaned = re.sub(r'^(https?://)[^@/]+@', r'\1', url)
+    return cleaned
+
+def setup_credential_store(user_id: str, repo_url: str, token: str) -> None:
+    """
+    Save the user's token into the persistent Git credential store.
+    Note: This doesn't take a 'repo' object like the one in file_storage.py
+    because we don't have a repo object here yet (it might not be cloned).
+    The Worker will configure the 'credential.helper' in the repo config.
+    """
+    # 1. Define persistent credential file path in /storage/{user_id}/.git-credentials
+    cred_file = STORAGE_ROOT / user_id / ".git-credentials"
+    cred_file.parent.mkdir(parents=True, exist_ok=True)
+
+    # 2. Use git credential approve to save the token if provided
+    if not token:
+        return
+
+    protocol = "https"
+    host = ""
+    path = "/"
+    url_parts = repo_url.split("://", 1)
+    if len(url_parts) > 1:
+        protocol = url_parts[0]
+        rest = url_parts[1].split("@", 1)[-1]
+        host_path = rest.split("/", 1)
+        host = host_path[0]
+        if len(host_path) > 1:
+            path = "/" + host_path[1]
+
+    input_data = f"protocol={protocol}\nhost={host}\npath={path}\nusername={token}\npassword=\n\n"
+
+    try:
+        subprocess.run(
+            ["git", "-c", f"credential.helper=store --file={cred_file}", "credential", "approve"],
+            input=input_data.encode("utf-8"),
+            check=True,
+            capture_output=True
+        )
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(f"Failed to store credentials for user {user_id}: {e}")
+
+def get_token_from_store(user_id: str, repo_url: str) -> Optional[str]:
+    """
+    Retrieve the token for a specific repository from the persistent Git store.
+    """
+    cred_file = STORAGE_ROOT / user_id / ".git-credentials"
+    if not cred_file.exists():
+        return None
+
+    protocol = "https"
+    host = ""
+    path = "/"
+    url_parts = repo_url.split("://", 1)
+    if len(url_parts) > 1:
+        protocol = url_parts[0]
+        rest = url_parts[1].split("@", 1)[-1]
+        host_path = rest.split("/", 1)
+        host = host_path[0]
+        if len(host_path) > 1:
+            path = "/" + host_path[1]
+
+    input_data = f"protocol={protocol}\nhost={host}\npath={path}\n"
+
+    try:
+        result = subprocess.run(
+            ["git", "-c", f"credential.helper=store --file={cred_file}", "credential", "fill"],
+            input=input_data.encode("utf-8"),
+            check=True,
+            capture_output=True
+        )
+        output = result.stdout.decode("utf-8")
+        # Parse output for username=...
+        for line in output.splitlines():
+            if line.startswith("username="):
+                return line.split("=", 1)[1]
+    except Exception:
+        return None
 
 
 async def auto_configure_obsidian_sync(
@@ -66,27 +160,32 @@ async def auto_configure_obsidian_sync(
                 content = await f.read()
                 existing_config = json.loads(content)
             # Only update if values changed
-            if (existing_config.get("repo_url") == repo_url and
-                existing_config.get("token") == token and
-                existing_config.get("branch") == branch):
+            # Note: token is stored in Git credential store, not in config file
+            if (existing_config.get("repo_url") == clean_remote_url(repo_url) and
+                "token" not in existing_config and
+                existing_config.get("branch") == branch and
+                get_token_from_store(user_id, repo_url) == token):
                 logger.debug(f"Obsidian sync config unchanged for user {user_id}")
                 return  # No changes needed
         except (json.JSONDecodeError, FileNotFoundError) as e:
             logger.warning(f"Failed to read existing config for user {user_id}: {e}")
             # Proceed with write if read fails
 
+    # Remove token from config before saving
     config = {
-        "repo_url": repo_url,
-        "token": token,
+        "repo_url": clean_remote_url(repo_url), # Save clean URL
         "branch": branch,
         "updated_at": datetime.utcnow().isoformat(),
         "auto_configured": True,
-        "version": "1.0",  # For future migrations
-        "failure_count": 0,  # Reset failure count when auto-configuring
+        "version": "1.1",  # Incremented version
+        "failure_count": 0,
         "stopped": False
     }
 
     try:
+        # Save token to persistent Git store
+        setup_credential_store(user_id, repo_url, token)
+
         # Atomic write: write to temp file, then rename
         async with aiofiles.open(temp_path, 'w', encoding='utf-8') as f:
             await f.write(json.dumps(config, indent=2))
@@ -194,19 +293,36 @@ async def configure_obsidian_sync(repo_url: str = None, token: str = None, branc
         )
 
     # Parameters provided - update/create configuration
+    if config_path.exists():
+        try:
+            async with aiofiles.open(config_path, 'r', encoding='utf-8') as f:
+                content = await f.read()
+                existing_config = json.loads(content)
+            # Only update if values changed
+            if (existing_config.get("repo_url") == clean_remote_url(repo_url) and
+                "token" not in existing_config and
+                existing_config.get("branch") == branch and
+                get_token_from_store(user_id, repo_url) == token):
+                return f"Obsidian sync is already configured with these settings for repository: {repo_url}"
+        except (json.JSONDecodeError, FileNotFoundError):
+            pass  # Proceed with write if read fails
+
+    # Remove token from config before saving
     config = {
-        "repo_url": repo_url,
-        "token": token,
+        "repo_url": clean_remote_url(repo_url), # Save clean URL
         "branch": branch,
         "updated_at": datetime.utcnow().isoformat(),
         "auto_configured": False,
-        "version": "1.0",
+        "version": "1.1",  # Incremented version
         "failure_count": 0,  # Reset failure count when reconfiguring
         "stopped": False
     }
 
     temp_path = user_dir / "git_config.json.tmp"
     try:
+        # Save token to persistent Git store
+        setup_credential_store(user_id, repo_url, token)
+
         # Use atomic write pattern for consistency
         async with aiofiles.open(temp_path, 'w', encoding='utf-8') as f:
             await f.write(json.dumps(config, indent=2))
