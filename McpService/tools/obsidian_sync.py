@@ -27,7 +27,7 @@ async def auto_configure_obsidian_sync(
     """
     Automatically configure Obsidian sync when credentials are provided via headers.
     This is called by middleware when customUserVars are set.
-    
+
     Args:
         user_id: LibreChat user ID
         repo_url: Git repository URL
@@ -36,12 +36,12 @@ async def auto_configure_obsidian_sync(
     """
     import logging
     logger = logging.getLogger(__name__)
-    
+
     # Validate that values are not placeholders (LibreChat bug: placeholders not replaced)
     def is_placeholder(value: str) -> bool:
         """Check if value is an unreplaced LibreChat placeholder."""
         return value.startswith("{{") and value.endswith("}}")
-    
+
     if is_placeholder(repo_url) or is_placeholder(token) or is_placeholder(branch):
         logger.warning(
             f"Rejecting placeholder values for user {user_id}. "
@@ -54,11 +54,11 @@ async def auto_configure_obsidian_sync(
             "Invalid configuration: LibreChat did not replace placeholder values. "
             "Please ensure customUserVars are properly set in LibreChat UI settings."
         )
-    
+
     user_dir = get_user_storage_path(user_id)
     config_path = user_dir / "git_config.json"
     temp_path = user_dir / "git_config.json.tmp"
-    
+
     # Check if config already exists and is the same
     if config_path.exists():
         try:
@@ -74,7 +74,7 @@ async def auto_configure_obsidian_sync(
         except (json.JSONDecodeError, FileNotFoundError) as e:
             logger.warning(f"Failed to read existing config for user {user_id}: {e}")
             # Proceed with write if read fails
-    
+
     config = {
         "repo_url": repo_url,
         "token": token,
@@ -85,7 +85,7 @@ async def auto_configure_obsidian_sync(
         "failure_count": 0,  # Reset failure count when auto-configuring
         "stopped": False
     }
-    
+
     try:
         # Atomic write: write to temp file, then rename
         async with aiofiles.open(temp_path, 'w', encoding='utf-8') as f:
@@ -103,28 +103,28 @@ async def auto_configure_obsidian_sync(
 async def configure_obsidian_sync(repo_url: str = None, token: str = None, branch: str = "main") -> str:
     """
     Configure Git Sync for Obsidian Vault.
-    
+
     All parameters are optional. If not provided, the tool will:
     1. Check if already configured (returns existing config)
     2. If not configured, prompt user to set via customUserVars in UI settings
-    
+
     This tool can be used to:
     - Check current configuration status
     - Update existing configuration
     - Configure manually (if customUserVars not used)
-    
+
     Args:
         repo_url: HTTP(S) URL of the Git repository (optional)
         token: Personal Access Token (optional)
         branch: Branch to sync (default: "main", optional)
-        
+
     Returns:
         Status message with current configuration or success message
     """
     user_id = get_current_user()
     user_dir = get_user_storage_path(user_id)
     config_path = user_dir / "git_config.json"
-    
+
     # If no parameters provided, check if already configured
     if not repo_url or not token:
         if config_path.exists():
@@ -135,16 +135,16 @@ async def configure_obsidian_sync(repo_url: str = None, token: str = None, branc
                 repo = existing_config.get('repo_url', 'unknown')
                 auto_configured = existing_config.get('auto_configured', False)
                 config_source = "auto-configured via customUserVars" if auto_configured else "manually configured"
-                
+
                 # Check sync status
                 stopped = existing_config.get('stopped', False)
                 failure_count = existing_config.get('failure_count', 0)
                 last_failure = existing_config.get('last_failure')
                 last_success = existing_config.get('last_success')
-                
+
                 status_msg = f"Obsidian sync is already configured for repository: {repo}\n"
                 status_msg += f"Configuration was {config_source}.\n"
-                
+
                 if stopped:
                     status_msg += f"\n⚠️ **SYNC STOPPED** - Failed {failure_count} times consecutively.\n"
                     if last_failure:
@@ -163,7 +163,7 @@ async def configure_obsidian_sync(repo_url: str = None, token: str = None, branc
                     status_msg += "\n✅ Sync is active and running.\n"
                     if last_success:
                         status_msg += f"Last successful sync: {last_success}\n"
-                
+
                 status_msg += "\nTo update, provide new repo_url and/or token parameters, or update customUserVars in UI settings."
                 return status_msg
             except Exception as e:
@@ -181,18 +181,18 @@ async def configure_obsidian_sync(repo_url: str = None, token: str = None, branc
                 "1. Set customUserVars in UI settings (OBSIDIAN_REPO_URL, OBSIDIAN_TOKEN, OBSIDIAN_BRANCH) - recommended\n"
                 "2. Provide repo_url and token parameters to this tool"
             )
-    
+
     # Validate that values are not placeholders
     def is_placeholder(value: str) -> bool:
         """Check if value is an unreplaced LibreChat placeholder."""
         return value.startswith("{{") and value.endswith("}}")
-    
+
     if is_placeholder(repo_url) or is_placeholder(token) or is_placeholder(branch):
         raise ValueError(
             "Invalid configuration: LibreChat did not replace placeholder values. "
             "Please ensure customUserVars are properly set in LibreChat UI settings."
         )
-    
+
     # Parameters provided - update/create configuration
     config = {
         "repo_url": repo_url,
@@ -204,7 +204,7 @@ async def configure_obsidian_sync(repo_url: str = None, token: str = None, branc
         "failure_count": 0,  # Reset failure count when reconfiguring
         "stopped": False
     }
-    
+
     temp_path = user_dir / "git_config.json.tmp"
     try:
         # Use atomic write pattern for consistency
@@ -222,28 +222,28 @@ async def configure_obsidian_sync(repo_url: str = None, token: str = None, branc
 async def get_obsidian_sync_status() -> str:
     """
     Get the current status of Obsidian sync, including failure information.
-    
+
     If no configuration exists but Obsidian headers are present (customUserVars set),
     automatically attempts to initialize the configuration.
-    
+
     Returns:
         Detailed status message including sync state, failure count, and last sync times
     """
     import logging
     logger = logging.getLogger(__name__)
-    
+
     user_id = get_current_user()
     user_dir = get_user_storage_path(user_id)
     config_path = user_dir / "git_config.json"
-    
+
     if not config_path.exists():
         # Check if Obsidian headers are available (customUserVars set in UI)
         repo_url, token, branch = get_obsidian_headers()
-        
+
         # Check if headers are present and not placeholders
         def is_placeholder(value: str) -> bool:
             return value and value.startswith("{{") and value.endswith("}}")
-        
+
         if repo_url and token and not is_placeholder(repo_url) and not is_placeholder(token):
             # Headers are present and valid - attempt auto-configuration
             logger.info(f"Attempting auto-configuration for user {user_id} from status check")
@@ -251,7 +251,7 @@ async def get_obsidian_sync_status() -> str:
                 # Use default branch if not provided
                 if not branch or is_placeholder(branch):
                     branch = "main"
-                
+
                 await auto_configure_obsidian_sync(user_id, repo_url, token, branch)
                 logger.info(f"✅ Successfully auto-configured Obsidian sync for user {user_id}")
                 return (
@@ -279,32 +279,32 @@ async def get_obsidian_sync_status() -> str:
                 "1. Set customUserVars in UI settings (OBSIDIAN_REPO_URL, OBSIDIAN_TOKEN, OBSIDIAN_BRANCH) - recommended\n"
                 "2. Use configure_obsidian_sync tool with repo_url and token parameters"
             )
-    
+
     try:
         async with aiofiles.open(config_path, 'r', encoding='utf-8') as f:
             content = await f.read()
             config = json.loads(content)
-        
+
         repo = config.get('repo_url', 'unknown')
         branch = config.get('branch', 'main')
         auto_configured = config.get('auto_configured', False)
         config_source = "auto-configured via customUserVars" if auto_configured else "manually configured"
-        
+
         # Check for placeholder values (LibreChat bug)
         def is_placeholder(value: str) -> bool:
             return value.startswith("{{") and value.endswith("}}")
-        
+
         has_placeholders = is_placeholder(repo) or is_placeholder(branch) or is_placeholder(config.get('token', ''))
-        
+
         # Calculate sync percentage
         vault_path = user_dir / "obsidian_vault"
         total_files = 0
         synced_files = 0
-        
+
         if vault_path.exists():
             import os
             from pathlib import Path
-            
+
             # Count total markdown files (excluding hidden directories)
             for root, dirs, files in os.walk(vault_path):
                 # Skip hidden directories
@@ -314,7 +314,7 @@ async def get_obsidian_sync_status() -> str:
                 for file in files:
                     if file.endswith('.md'):
                         total_files += 1
-            
+
             # Count synced files (files with entries in sync_hashes.json)
             hash_db_path = user_dir / "sync_hashes.json"
             if hash_db_path.exists():
@@ -322,7 +322,7 @@ async def get_obsidian_sync_status() -> str:
                     async with aiofiles.open(hash_db_path, 'r', encoding='utf-8') as f:
                         hash_content = await f.read()
                         hashes = json.loads(hash_content)
-                    
+
                     # Count how many hash entries correspond to actual .md files in vault
                     for hash_key in hashes.keys():
                         hash_path = Path(hash_key)
@@ -339,19 +339,19 @@ async def get_obsidian_sync_status() -> str:
                             pass  # Path might not exist anymore
                 except Exception:
                     pass  # If hash DB is corrupted, just show 0 synced
-        
+
         sync_percentage = (synced_files / total_files * 100) if total_files > 0 else 0
-        
+
         # Calculate ETA for sync completion
         def format_eta_minutes(total_minutes: int) -> str:
             """Format minutes into human-friendly ETA string (e.g., '1 day and 2 hours and 15 minutes')"""
             if total_minutes <= 0:
                 return "less than 1 minute"
-            
+
             days = total_minutes // (24 * 60)
             hours = (total_minutes % (24 * 60)) // 60
             minutes = total_minutes % 60
-            
+
             parts = []
             if days > 0:
                 parts.append(f"{days} day{'s' if days != 1 else ''}")
@@ -359,17 +359,17 @@ async def get_obsidian_sync_status() -> str:
                 parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
             if minutes > 0:
                 parts.append(f"{minutes} minute{'s' if minutes != 1 else ''}")
-            
+
             if not parts:
                 return "less than 1 minute"
-            
+
             if len(parts) == 1:
                 return parts[0]
             elif len(parts) == 2:
                 return f"{parts[0]} and {parts[1]}"
             else:
                 return f"{', '.join(parts[:-1])}, and {parts[-1]}"
-        
+
         # Calculate ETA using environment variables
         eta_minutes = None
         if total_files > 0 and synced_files < total_files:
@@ -378,12 +378,12 @@ async def get_obsidian_sync_status() -> str:
             files_per_cycle = int(os.environ.get("MAX_FILES_PER_CYCLE", "10"))
             sync_interval_seconds = int(os.environ.get("SYNC_INTERVAL", "60"))
             sync_interval_minutes = sync_interval_seconds / 60.0
-            
+
             # Calculate cycles needed (ceiling division)
             cycles_needed = (remaining_files + files_per_cycle - 1) // files_per_cycle
             # Convert to minutes (cycles * interval in minutes)
             eta_minutes = int(round(cycles_needed * sync_interval_minutes))
-        
+
         # Sync status information
         stopped = config.get('stopped', False)
         failure_count = config.get('failure_count', 0)
@@ -391,10 +391,10 @@ async def get_obsidian_sync_status() -> str:
         last_failure_error = config.get('last_failure_error')
         last_success = config.get('last_success')
         updated_at = config.get('updated_at', 'unknown')
-        
+
         status = []
         status.append("=== Obsidian Sync Status ===")
-        
+
         if has_placeholders:
             status.append("⚠️ **CONFIGURATION ERROR**")
             status.append("LibreChat did not replace placeholder values in customUserVars.")
@@ -404,7 +404,7 @@ async def get_obsidian_sync_status() -> str:
             status.append(f"Branch: {branch}")
             status.append("")
             status.append("**To fix:**")
-            status.append("1. Go to LibreChat UI Settings → MCP Servers → obsidian_sync_mcp")
+            status.append("1. Go to LibreChat UI Settings → MCP Servers → obsidian")
             status.append("2. Set customUserVars:")
             status.append("   - OBSIDIAN_REPO_URL: Your actual Git repository URL")
             status.append("   - OBSIDIAN_TOKEN: Your actual Personal Access Token")
@@ -413,13 +413,13 @@ async def get_obsidian_sync_status() -> str:
             status.append("")
             status.append("**Note:** Sync cannot run with placeholder values.")
             return "\n".join(status)
-        
+
         status.append(f"Repository: {repo}")
         status.append(f"Branch: {branch}")
         status.append(f"Configuration: {config_source}")
         status.append(f"Last updated: {updated_at}")
         status.append("")
-        
+
         # Add sync progress
         if total_files > 0:
             status.append(f"**Sync Progress:** {synced_files}/{total_files} files ({sync_percentage:.1f}%)")
@@ -430,7 +430,7 @@ async def get_obsidian_sync_status() -> str:
                     eta_string = format_eta_minutes(eta_minutes)
                     status.append(f"**Estimated time to completion:** {eta_string}")
             status.append("")
-        
+
         if stopped:
             status.append("❌ **SYNC STOPPED**")
             status.append(f"Sync has been stopped after {failure_count} consecutive failures.")
@@ -462,9 +462,9 @@ async def get_obsidian_sync_status() -> str:
                 status.append(f"Last successful sync: {last_success}")
             else:
                 status.append("No sync attempts recorded yet.")
-        
+
         return "\n".join(status)
-        
+
     except Exception as e:
         return f"Error reading sync status: {e}"
 
@@ -472,40 +472,40 @@ async def get_obsidian_sync_status() -> str:
 async def reset_obsidian_sync_failures() -> str:
     """
     Reset the failure count for Obsidian sync, allowing it to run again if it was stopped.
-    
+
     Returns:
         Success message
     """
     user_id = get_current_user()
     user_dir = get_user_storage_path(user_id)
     config_path = user_dir / "git_config.json"
-    
+
     if not config_path.exists():
         return "No Obsidian sync configuration found. Nothing to reset."
-    
+
     try:
         async with aiofiles.open(config_path, 'r', encoding='utf-8') as f:
             content = await f.read()
             config = json.loads(content)
-        
+
         # Reset failure tracking
         config['failure_count'] = 0
         config['stopped'] = False
         config.pop('last_failure', None)
         config.pop('last_failure_error', None)
         config['updated_at'] = datetime.utcnow().isoformat()
-        
+
         # Atomic write
         temp_path = user_dir / "git_config.json.tmp"
         async with aiofiles.open(temp_path, 'w', encoding='utf-8') as f:
             await f.write(json.dumps(config, indent=2))
         temp_path.replace(config_path)
-        
+
         return (
             "Successfully reset Obsidian sync failure count.\n"
             "Sync will resume on the next cycle. Make sure your repository URL and token are correct."
         )
-        
+
     except Exception as e:
         raise RuntimeError(f"Failed to reset sync failures: {e}")
 
@@ -513,19 +513,19 @@ async def reset_obsidian_sync_failures() -> str:
 async def force_complete_reindex() -> str:
     """
     Force a complete reindex of all Obsidian vault files by deleting sync_hashes.json.
-    
+
     This will cause the sync worker to reindex all markdown files in the next sync cycle,
     regardless of whether they have changed. Useful when:
     - RAG API data is corrupted or missing
     - Files were modified outside the sync process
     - User wants to refresh all indexed content
-    
+
     Returns:
         Success message indicating reindex will occur on next sync cycle
     """
     user_id = get_current_user()
     user_dir = get_user_storage_path(user_id)
-    
+
     # Check if sync is configured
     config_path = user_dir / "git_config.json"
     if not config_path.exists():
@@ -533,7 +533,7 @@ async def force_complete_reindex() -> str:
             "Obsidian sync is not configured. "
             "Please configure sync first using 'configure_obsidian_sync'."
         )
-    
+
     # Delete sync_hashes.json to force reindex
     hash_db_path = user_dir / "sync_hashes.json"
     try:

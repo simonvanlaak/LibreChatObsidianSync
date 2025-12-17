@@ -26,7 +26,7 @@ node_modules/
 
 # Task files
 # tasks.json
-# tasks/ 
+# tasks/
 data/user-files
 
 # Python cache files
@@ -41,6 +41,7 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .coverage
+coverage.xml
 htmlcov/
 .tox/
 .hypothesis/

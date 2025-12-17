@@ -68,7 +68,7 @@ else:
 
 # Add health check endpoint
 async def health_check(_request):
-    return JSONResponse({"status": "healthy", "service": "obsidian-sync-mcp"})
+    return JSONResponse({"status": "healthy", "service": "obsidian"})
 
 
 health_routes = [
