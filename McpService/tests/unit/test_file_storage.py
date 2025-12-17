@@ -334,6 +334,71 @@ class TestFileOperations:
         assert "Error: File 'nonexistent.txt' not found" in result
     
     @pytest.mark.asyncio
+    async def test_upload_file_uses_multipart_form_data(self, temp_storage_dir, setup_user, mock_rag_api):
+        """Test that upload_file uses multipart/form-data, not JSON"""
+        await file_storage.upload_file("test.txt", "Hello, world!")
+        
+        # Verify post was called
+        assert mock_rag_api.post.called
+        
+        # Get the call arguments
+        call_kwargs = mock_rag_api.post.call_args[1]
+        
+        # Verify multipart/form-data is used (files and data parameters)
+        assert 'files' in call_kwargs, "Should use 'files' parameter for multipart"
+        assert 'data' in call_kwargs, "Should use 'data' parameter for multipart"
+        assert 'json' not in call_kwargs, "Should NOT use 'json' parameter"
+        
+        # Verify Content-Type is not set to application/json
+        headers = call_kwargs.get('headers', {})
+        assert headers.get('Content-Type') != 'application/json', "Should not set Content-Type to application/json"
+        
+        # Verify file_id is in data
+        assert 'file_id' in call_kwargs['data']
+        
+        # Verify file is in files
+        assert 'file' in call_kwargs['files']
+    
+    @pytest.mark.asyncio
+    async def test_modify_file_uses_multipart_form_data(self, temp_storage_dir, setup_user, mock_rag_api):
+        """Test that modify_file uses multipart/form-data, not JSON"""
+        # First upload a file
+        await file_storage.upload_file("test.txt", "Original content")
+        
+        # Clear previous calls
+        mock_rag_api.post.reset_mock()
+        
+        # Now modify it
+        await file_storage.modify_file("test.txt", "Modified content")
+        
+        # Verify post was called for re-indexing
+        assert mock_rag_api.post.called
+        
+        # Get the call arguments for the POST call (re-indexing)
+        # Find the POST call that's not the initial upload
+        post_calls = [call for call in mock_rag_api.post.call_args_list if call]
+        assert len(post_calls) >= 1, "Should have at least one POST call for re-indexing"
+        
+        # Check the last POST call (the re-indexing call)
+        last_post_call = post_calls[-1]
+        call_kwargs = last_post_call[1] if len(last_post_call) > 1 else {}
+        
+        # Verify multipart/form-data is used (files and data parameters)
+        assert 'files' in call_kwargs, "Should use 'files' parameter for multipart"
+        assert 'data' in call_kwargs, "Should use 'data' parameter for multipart"
+        assert 'json' not in call_kwargs, "Should NOT use 'json' parameter"
+        
+        # Verify Content-Type is not set to application/json
+        headers = call_kwargs.get('headers', {})
+        assert headers.get('Content-Type') != 'application/json', "Should not set Content-Type to application/json"
+        
+        # Verify file_id is in data
+        assert 'file_id' in call_kwargs['data']
+        
+        # Verify file is in files
+        assert 'file' in call_kwargs['files']
+    
+    @pytest.mark.asyncio
     async def test_delete_file_success(self, temp_storage_dir, setup_user, mock_rag_api):
         """Test deleting a file"""
         await file_storage.upload_file("test.txt", "Content to delete")
@@ -426,12 +491,16 @@ class TestRAGIntegration:
         """Test that file IDs are properly formatted for user scoping"""
         await file_storage.upload_file("test.txt", "Content")
         
-        # Check the file_id sent to RAG API
+        # Check the file_id sent to RAG API (now in data parameter for multipart)
         call_args = mock_rag_api.post.call_args
-        request_data = call_args[1]["json"]
-        
-        assert request_data["file_id"] == "user_test_user_123_test.txt"
-        assert request_data["metadata"]["user_id"] == "test_user_123"
+        call_kwargs = call_args[1]
+        # With multipart/form-data, file_id is in data, not json
+        assert 'data' in call_kwargs, "Should use 'data' parameter for multipart"
+        assert call_kwargs["data"]["file_id"] == "user_test_user_123_test.txt"
+        # Metadata is in storage_metadata as JSON string
+        import json
+        metadata = json.loads(call_kwargs["data"]["storage_metadata"])
+        assert metadata["user_id"] == "test_user_123"
     
     @pytest.mark.asyncio
     async def test_rag_api_with_jwt_auth(self, temp_storage_dir, setup_user):

@@ -7,6 +7,7 @@ All file changes trigger Git commit and push (if Git is configured) and RAG inde
 """
 
 import os
+import io
 import json
 import httpx
 import aiofiles
@@ -199,23 +200,34 @@ async def upload_file(filename: str, content: str) -> str:
     try:
         token = _generate_jwt_token(user_id)
         headers = {
-            "Content-Type": "application/json",
             "Accept": "application/json"
         }
         if token:
             headers["Authorization"] = f"Bearer {token}"
         
+        # Create multipart form data
+        # httpx expects files as tuple: (filename, file-like object, content_type)
+        files = {
+            'file': (filename, io.BytesIO(content.encode('utf-8')), 'text/markdown')
+        }
+        data = {
+            'file_id': file_id
+        }
+        
+        # Add storage_metadata if needed (optional, but LibreChat sends it)
+        if metadata:
+            data['storage_metadata'] = json.dumps(metadata)
+        
+        # Remove Content-Type header - httpx will set it correctly for multipart
+        multipart_headers = {k: v for k, v in headers.items() if k.lower() != 'content-type'}
+        
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
                 f"{RAG_API_URL}/embed",
-                json={
-                    "file_id": file_id,
-                    "content": content,
-                    "metadata": metadata,
-                    "chunk_size": CHUNK_SIZE,
-                    "chunk_overlap": CHUNK_OVERLAP
-                },
-                headers=headers
+                files=files,
+                data=data,
+                headers=multipart_headers,
+                timeout=30.0
             )
             response.raise_for_status()
     except Exception as e:
@@ -376,7 +388,6 @@ async def modify_file(filename: str, content: str) -> str:
     try:
         token = _generate_jwt_token(user_id)
         headers = {
-            "Content-Type": "application/json",
             "Accept": "application/json"
         }
         if token:
@@ -388,17 +399,28 @@ async def modify_file(filename: str, content: str) -> str:
             encoded_file_id = urllib.parse.quote(file_id, safe='')
             await client.delete(f"{RAG_API_URL}/embed/{encoded_file_id}", headers=headers)
             
-            # Create new embeddings
+            # Create new embeddings using multipart/form-data
+            # httpx expects files as tuple: (filename, file-like object, content_type)
+            files = {
+                'file': (filename, io.BytesIO(content.encode('utf-8')), 'text/markdown')
+            }
+            data = {
+                'file_id': file_id
+            }
+            
+            # Add storage_metadata if needed (optional, but LibreChat sends it)
+            if metadata:
+                data['storage_metadata'] = json.dumps(metadata)
+            
+            # Remove Content-Type header - httpx will set it correctly for multipart
+            multipart_headers = {k: v for k, v in headers.items() if k.lower() != 'content-type'}
+            
             response = await client.post(
                 f"{RAG_API_URL}/embed",
-                json={
-                    "file_id": file_id,
-                    "content": content,
-                    "metadata": metadata,
-                    "chunk_size": CHUNK_SIZE,
-                    "chunk_overlap": CHUNK_OVERLAP
-                },
-                headers=headers
+                files=files,
+                data=data,
+                headers=multipart_headers,
+                timeout=30.0
             )
             response.raise_for_status()
     except Exception as e:
