@@ -43,6 +43,53 @@ def get_file_id(user_id: str, filename: str) -> str:
     return f"user_{user_id}_{filename}"
 
 
+def _should_exclude_file(file_path: Path, user_dir: Path) -> bool:
+    """
+    Check if a file should be excluded from search and listing.
+    
+    Excludes:
+    - Files in .git directory or any path containing .git
+    - Hash files (e.g., sync_hashes.json)
+    - Files in root directory (only subdirectories allowed)
+    
+    Args:
+        file_path: Full path to the file (may be absolute or relative)
+        user_dir: User's storage root directory
+        
+    Returns:
+        True if file should be excluded, False otherwise
+    """
+    try:
+        # Try to get relative path from user_dir
+        relative_path = file_path.relative_to(user_dir)
+    except ValueError:
+        # File is not under user_dir, check if it's a hash file by name
+        hash_file_names = {'sync_hashes.json', 'git_config.json'}
+        if file_path.name in hash_file_names:
+            return True
+        # If we can't determine relative path, don't exclude (might be valid)
+        return False
+    
+    # Exclude files in root directory (only subdirectories allowed)
+    if relative_path.parent == Path('.'):
+        return True
+    
+    # Exclude .git directory and any path containing .git
+    if '.git' in relative_path.parts:
+        return True
+    
+    # Exclude hash files (sync_hashes.json, git_config.json, etc.)
+    hash_file_names = {'sync_hashes.json', 'git_config.json'}
+    if file_path.name in hash_file_names:
+        return True
+    
+    # Exclude any file in a directory starting with '.'
+    if any(part.startswith('.') for part in relative_path.parts):
+        return True
+    
+    return False
+
+
 def _generate_jwt_token(user_id: str) -> str:
     """Generate a JWT token for RAG API authentication."""
     if not RAG_API_JWT_SECRET:
@@ -300,7 +347,8 @@ async def create_note(title: str, content: str) -> str:
 async def list_files(_: str = "") -> str:
     """
     List all files in the user's storage with metadata.
-    Includes files in the root directory and in subdirectories (e.g., obsidian_vault).
+    Only includes files in subdirectories (excludes root directory files).
+    Excludes .git directory, hash files, and other hidden directories.
     
     Args:
         _: Optional parameter (ignored) - FastMCP may pass empty string
@@ -313,23 +361,16 @@ async def list_files(_: str = "") -> str:
     
     files = []
     
-    # List files in root directory
-    for file_path in user_dir.iterdir():
-        if file_path.is_file():
-            stat = file_path.stat()
-            files.append({
-                "filename": file_path.name,
-                "size": stat.st_size,
-                "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
-                "path": str(file_path.relative_to(user_dir)),
-                "directory": ""
-            })
-    
+    # Only list files in subdirectories (exclude root directory files)
     # Recursively list files in subdirectories (e.g., obsidian_vault)
     for subdir in user_dir.iterdir():
         if subdir.is_dir() and not subdir.name.startswith('.'):
             for file_path in subdir.rglob('*'):
                 if file_path.is_file():
+                    # Exclude .git files, hash files, and other excluded files
+                    if _should_exclude_file(file_path, user_dir):
+                        continue
+                    
                     stat = file_path.stat()
                     relative_path = file_path.relative_to(user_dir)
                     files.append({
@@ -671,6 +712,7 @@ async def _get_query_embedding(query: str, user_id: str) -> list:
 async def _query_vectordb_direct(query_embedding: list, user_id: str, max_results: int = 5) -> List[Dict]:
     """
     Query vectordb directly using pgvector for semantic search across all user files.
+    Excludes .git files, hash files, and root directory files.
     
     Args:
         query_embedding: Embedding vector for the query
@@ -678,7 +720,7 @@ async def _query_vectordb_direct(query_embedding: list, user_id: str, max_result
         max_results: Maximum number of results to return
         
     Returns:
-        List of result dictionaries with content, distance, and metadata
+        List of result dictionaries with content, distance, and metadata (excluding filtered files)
     """
     try:
         import asyncpg
@@ -687,6 +729,9 @@ async def _query_vectordb_direct(query_embedding: list, user_id: str, max_result
         raise RuntimeError("asyncpg and pgvector are required for direct vectordb queries. Install with: pip install asyncpg pgvector")
     
     try:
+        # Get user directory for exclusion checking
+        user_dir = get_user_storage_path(user_id)
+        
         # Connect to PostgreSQL
         conn = await asyncpg.connect(
             host=VECTORDB_HOST,
@@ -708,6 +753,7 @@ async def _query_vectordb_direct(query_embedding: list, user_id: str, max_result
         # Filter by user_id in metadata JSONB field
         # <=> operator is cosine distance (lower is better)
         # Also select custom_id to extract filename as fallback
+        # Query more results than needed to account for filtering
         query_sql = """
             SELECT 
                 document,
@@ -720,7 +766,8 @@ async def _query_vectordb_direct(query_embedding: list, user_id: str, max_result
             LIMIT $3
         """
         
-        rows = await conn.fetch(query_sql, query_vector, user_id, max_results)
+        # Query more results to account for filtering (3x to ensure we get enough after filtering)
+        rows = await conn.fetch(query_sql, query_vector, user_id, max_results * 3)
         
         results = []
         for row in rows:
@@ -746,12 +793,38 @@ async def _query_vectordb_direct(query_embedding: list, user_id: str, max_result
                 else:
                     filename = "unknown"
             
+            # Check if file should be excluded
+            # Filename may be:
+            # 1. Base filename (e.g., "note.md") - from MCP tools, indicates root-level file
+            # 2. Relative path (e.g., "notes/note.md") - from Worker, relative to vault root, indicates subdirectory
+            # For exclusion check, we only need to know if it's root-level (base filename) or subdirectory (has path separators)
+            if filename != "unknown":
+                # Check if filename is a base name (root-level) or has path separators (subdirectory)
+                # Worker now stores relative paths (e.g., "notes/note.md"), so files with "/" are in subdirectories
+                filename_path = Path(filename)
+                
+                # If filename has no parent (is base name), it's root-level and should be excluded
+                # If filename has parent parts, it's in a subdirectory and should not be excluded
+                if filename_path.parent == Path('.'):
+                    # Base filename - root-level file, exclude it
+                    continue
+                
+                # For files with path separators, check other exclusions (git, hash files, etc.)
+                # Construct a path for exclusion checking (doesn't need to exist)
+                file_path = user_dir / filename
+                if _should_exclude_file(file_path, user_dir):
+                    continue  # Skip excluded files
+            
             results.append({
                 "content": row['document'] or "",
                 "distance": 1.0 - float(row['similarity']),  # Convert similarity to distance
                 "metadata": metadata,
                 "filename": filename  # Explicitly include filename
             })
+            
+            # Stop once we have enough results
+            if len(results) >= max_results:
+                break
         
         await conn.close()
         return results

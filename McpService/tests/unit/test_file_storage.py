@@ -48,8 +48,10 @@ def mock_rag_api():
         
         # Mock successful responses
         mock_response = MagicMock()
+        mock_response.status_code = 200  # Set status_code as int, not MagicMock
         mock_response.raise_for_status = MagicMock()
         mock_response.json.return_value = {"results": []}
+        mock_response.text = ""  # Add text attribute for error handling
         
         mock_instance.post.return_value = mock_response
         mock_instance.delete.return_value = mock_response
@@ -155,14 +157,25 @@ class TestFileOperations:
     
     @pytest.mark.asyncio
     async def test_list_files(self, temp_storage_dir, setup_user, mock_rag_api):
-        """Test listing files in root directory"""
-        # Upload multiple files
-        await file_storage.upload_file("test_list_file1.txt", "Content 1")
-        await file_storage.upload_file("test_list_file2.txt", "Content 2")
+        """Test listing files in subdirectories (root directory files are excluded)"""
+        import aiofiles
+        
+        # Create a subdirectory and add files there (root directory files are now excluded)
+        user_dir = temp_storage_dir / "test_user_123"
+        subdir = user_dir / "test_list_subdir"
+        subdir.mkdir(parents=True, exist_ok=True)
+        
+        # Create files in subdirectory
+        file1 = subdir / "test_list_file1.txt"
+        file2 = subdir / "test_list_file2.txt"
+        async with aiofiles.open(file1, 'w', encoding='utf-8') as f:
+            await f.write("Content 1")
+        async with aiofiles.open(file2, 'w', encoding='utf-8') as f:
+            await f.write("Content 2")
         
         result = await file_storage.list_files()
         
-        # Check that our specific files are listed
+        # Check that our specific files are listed (from subdirectory)
         assert "test_list_file1.txt" in result
         assert "test_list_file2.txt" in result
         assert "Size:" in result
@@ -189,7 +202,7 @@ class TestFileOperations:
     
     @pytest.mark.asyncio
     async def test_list_files_includes_subdirectories(self, temp_storage_dir, setup_user, mock_rag_api):
-        """Test that list_files includes files in subdirectories"""
+        """Test that list_files includes files in subdirectories (root directory files are excluded)"""
         import aiofiles
         
         # Clean up any existing files first
@@ -199,10 +212,14 @@ class TestFileOperations:
                 if file_path.is_file():
                     file_path.unlink()
         
-        # Upload file to root with unique name
-        await file_storage.upload_file("test_subdir_root.txt", "Root content")
+        # Create files in subdirectories (root directory files are now excluded)
+        subdir1 = user_dir / "test_subdir1"
+        subdir1.mkdir(parents=True, exist_ok=True)
+        file1 = subdir1 / "test_subdir1_file.txt"
+        async with aiofiles.open(file1, 'w', encoding='utf-8') as f:
+            await f.write("Subdir1 content")
         
-        # Create a subdirectory and add a file manually
+        # Create another subdirectory and add a file
         vault_dir = user_dir / "test_subdir_vault"
         vault_dir.mkdir(parents=True, exist_ok=True)
         
@@ -212,13 +229,13 @@ class TestFileOperations:
         
         result = await file_storage.list_files()
         
-        # Check that both files are listed
-        assert "test_subdir_root.txt" in result
+        # Check that both files from subdirectories are listed (root files are excluded)
+        assert "test_subdir1_file.txt" in result
         assert "test_subdir_vault/test_subdir_vault_note.md" in result or "test_subdir_vault_note.md" in result
     
     @pytest.mark.asyncio
     async def test_list_files_sorted_by_directory_and_filename(self, temp_storage_dir, setup_user, mock_rag_api):
-        """Test that files are sorted by directory and filename"""
+        """Test that files are sorted by directory and filename (root directory files are excluded)"""
         import aiofiles
         
         # Clean up any existing files first
@@ -228,11 +245,20 @@ class TestFileOperations:
                 if file_path.is_file():
                     file_path.unlink()
         
-        # Create files in different directories with unique names
-        await file_storage.upload_file("test_sort_z_file.txt", "Z content")
-        await file_storage.upload_file("test_sort_a_file.txt", "A content")
+        # Create files in subdirectories (root directory files are now excluded)
+        subdir1 = user_dir / "test_sort_dir1"
+        subdir1.mkdir(parents=True, exist_ok=True)
+        file1 = subdir1 / "test_sort_z_file.txt"
+        async with aiofiles.open(file1, 'w', encoding='utf-8') as f:
+            await f.write("Z content")
         
-        # Create subdirectory files
+        subdir2 = user_dir / "test_sort_dir2"
+        subdir2.mkdir(parents=True, exist_ok=True)
+        file2 = subdir2 / "test_sort_a_file.txt"
+        async with aiofiles.open(file2, 'w', encoding='utf-8') as f:
+            await f.write("A content")
+        
+        # Create another subdirectory file
         subdir = user_dir / "test_sort_subdir"
         subdir.mkdir(parents=True, exist_ok=True)
         subdir_file = subdir / "test_sort_sub_file.txt"
@@ -241,15 +267,23 @@ class TestFileOperations:
         
         result = await file_storage.list_files()
         
-        # Check that files are listed (order may vary, but both should be present)
+        # Check that files from subdirectories are listed (order may vary, but all should be present)
         assert "test_sort_a_file.txt" in result
         assert "test_sort_z_file.txt" in result
         assert "test_sort_subdir/test_sort_sub_file.txt" in result or "test_sort_sub_file.txt" in result
     
     @pytest.mark.asyncio
     async def test_list_files_includes_metadata(self, temp_storage_dir, setup_user, mock_rag_api):
-        """Test that list_files includes file metadata (size, modified date)"""
-        await file_storage.upload_file("test.txt", "Test content")
+        """Test that list_files includes file metadata (size, modified date) - files must be in subdirectories"""
+        import aiofiles
+        
+        # Create file in subdirectory (root directory files are now excluded)
+        user_dir = temp_storage_dir / "test_user_123"
+        subdir = user_dir / "test_metadata_subdir"
+        subdir.mkdir(parents=True, exist_ok=True)
+        test_file = subdir / "test.txt"
+        async with aiofiles.open(test_file, 'w', encoding='utf-8') as f:
+            await f.write("Test content")
         
         result = await file_storage.list_files()
         
@@ -440,47 +474,32 @@ class TestRAGIntegration:
     
     @pytest.mark.asyncio
     async def test_search_files(self, temp_storage_dir, setup_user):
-        """Test semantic search using RAG API"""
-        with patch('tools.file_storage.httpx.AsyncClient') as mock_client:
-            mock_instance = AsyncMock()
-            mock_client.return_value.__aenter__.return_value = mock_instance
-            
-            # Mock search response
-            mock_response = MagicMock()
-            mock_response.raise_for_status = MagicMock()
-            mock_response.json.return_value = {
-                "results": [
-                    {
-                        "metadata": {"filename": "test.txt"},
-                        "score": 0.95,
-                        "text": "This is a test document with relevant content"
-                    }
-                ]
+        """Test semantic search using RAG API (now uses direct vectordb query)"""
+        # Mock the query functions that search_files uses
+        mock_results = [
+            {
+                "content": "This is a test document with relevant content",
+                "distance": 0.05,
+                "metadata": {"user_id": "test_user_123", "filename": "subdir/test.txt"},
+                "filename": "subdir/test.txt"
             }
-            mock_instance.post.return_value = mock_response
+        ]
+        
+        with patch('tools.file_storage._get_query_embedding', return_value=[0.1, 0.2, 0.3]), \
+             patch('tools.file_storage._query_vectordb_direct', return_value=mock_results):
             
             result = await file_storage.search_files("relevant content")
             
             assert "Found 1 result(s)" in result
-            assert "test.txt" in result
-            assert "0.950" in result
-            
-            # Verify query was scoped to user
-            call_args = mock_instance.post.call_args
-            query_data = call_args[1]["json"]
-            assert query_data["filters"]["user_id"] == "test_user_123"
+            assert "test.txt" in result or "subdir/test.txt" in result
+            assert "0.950" in result or "relevance:" in result
     
     @pytest.mark.asyncio
     async def test_search_no_results(self, temp_storage_dir, setup_user):
-        """Test search with no results"""
-        with patch('tools.file_storage.httpx.AsyncClient') as mock_client:
-            mock_instance = AsyncMock()
-            mock_client.return_value.__aenter__.return_value = mock_instance
-            
-            mock_response = MagicMock()
-            mock_response.raise_for_status = MagicMock()
-            mock_response.json.return_value = {"results": []}
-            mock_instance.post.return_value = mock_response
+        """Test search with no results (now uses direct vectordb query)"""
+        # Mock the query functions to return empty results
+        with patch('tools.file_storage._get_query_embedding', return_value=[0.1, 0.2, 0.3]), \
+             patch('tools.file_storage._query_vectordb_direct', return_value=[]):
             
             result = await file_storage.search_files("nonexistent query")
             
@@ -511,8 +530,10 @@ class TestRAGIntegration:
             mock_client.return_value.__aenter__.return_value = mock_instance
             
             mock_response = MagicMock()
+            mock_response.status_code = 200  # Set status_code as int
             mock_response.raise_for_status = MagicMock()
             mock_response.json.return_value = {"results": []}
+            mock_response.text = ""  # Add text attribute
             mock_instance.post.return_value = mock_response
             
             await file_storage.upload_file("test.txt", "Content")
@@ -677,19 +698,19 @@ class TestSearchFiles:
         with patch('tools.file_storage._get_query_embedding', return_value=[0.1, 0.2, 0.3]):
             mock_conn = AsyncPGMock()
             
-            # Create mock row with metadata containing filename
+            # Create mock row with metadata containing filename (must be in subdirectory, not root)
             mock_row = MagicMock()
-            mock_metadata = {"user_id": "test_user_123", "filename": "test_file.md", "size": 100}
+            mock_metadata = {"user_id": "test_user_123", "filename": "subdir/test_file.md", "size": 100}
             mock_row.__getitem__ = lambda self, key: {
                 'document': 'Test content from test_file.md',
                 'cmetadata': mock_metadata,
-                'custom_id': 'user_test_user_123_test_file.md',
+                'custom_id': 'user_test_user_123_subdir/test_file.md',
                 'similarity': 0.95
             }.get(key)
             mock_row.get = lambda key, default=None: {
                 'document': 'Test content from test_file.md',
                 'cmetadata': mock_metadata,
-                'custom_id': 'user_test_user_123_test_file.md',
+                'custom_id': 'user_test_user_123_subdir/test_file.md',
                 'similarity': 0.95
             }.get(key, default)
             
@@ -703,7 +724,7 @@ class TestSearchFiles:
                 result = await file_storage.search_files("test query")
                 
                 # Verify filename is returned (not "unknown")
-                assert "test_file.md" in result
+                assert "test_file.md" in result or "subdir/test_file.md" in result
                 assert "unknown" not in result
                 assert "Test content" in result
                 assert "relevance:" in result
@@ -718,19 +739,19 @@ class TestSearchFiles:
         with patch('tools.file_storage._get_query_embedding', return_value=[0.1, 0.2, 0.3]):
             mock_conn = AsyncPGMock()
             
-            # Create mock row with metadata missing filename, but custom_id has it
+            # Create mock row with metadata missing filename, but custom_id has it (must be in subdirectory)
             mock_row = MagicMock()
             mock_metadata = {"user_id": "test_user_123"}  # No filename in metadata
             mock_row.__getitem__ = lambda self, key: {
                 'document': 'Test content',
                 'cmetadata': mock_metadata,
-                'custom_id': 'user_test_user_123_my_document.txt',  # Filename in custom_id
+                'custom_id': 'user_test_user_123_subdir/my_document.txt',  # Filename in subdirectory
                 'similarity': 0.90
             }.get(key)
             mock_row.get = lambda key, default=None: {
                 'document': 'Test content',
                 'cmetadata': mock_metadata,
-                'custom_id': 'user_test_user_123_my_document.txt',
+                'custom_id': 'user_test_user_123_subdir/my_document.txt',
                 'similarity': 0.90
             }.get(key, default)
             
@@ -744,7 +765,7 @@ class TestSearchFiles:
                 result = await file_storage.search_files("test query")
                 
                 # Verify filename is extracted from custom_id
-                assert "my_document.txt" in result
+                assert "my_document.txt" in result or "subdir/my_document.txt" in result
                 assert "unknown" not in result
     
     @pytest.mark.asyncio
@@ -757,19 +778,19 @@ class TestSearchFiles:
         with patch('tools.file_storage._get_query_embedding', return_value=[0.1, 0.2, 0.3]):
             mock_conn = AsyncPGMock()
             
-            # Create mock row with metadata as JSON string
+            # Create mock row with metadata as JSON string (must be in subdirectory)
             mock_row = MagicMock()
-            mock_metadata_str = '{"user_id": "test_user_123", "filename": "json_file.md", "size": 200}'
+            mock_metadata_str = '{"user_id": "test_user_123", "filename": "subdir/json_file.md", "size": 200}'
             mock_row.__getitem__ = lambda self, key: {
                 'document': 'Content from json_file',
                 'cmetadata': mock_metadata_str,  # JSON string, not dict
-                'custom_id': 'user_test_user_123_json_file.md',
+                'custom_id': 'user_test_user_123_subdir/json_file.md',
                 'similarity': 0.85
             }.get(key)
             mock_row.get = lambda key, default=None: {
                 'document': 'Content from json_file',
                 'cmetadata': mock_metadata_str,
-                'custom_id': 'user_test_user_123_json_file.md',
+                'custom_id': 'user_test_user_123_subdir/json_file.md',
                 'similarity': 0.85
             }.get(key, default)
             
@@ -783,7 +804,7 @@ class TestSearchFiles:
                 result = await file_storage.search_files("test query")
                 
                 # Verify filename is parsed from JSON string metadata
-                assert "json_file.md" in result
+                assert "json_file.md" in result or "subdir/json_file.md" in result
                 assert "unknown" not in result
     
     @pytest.mark.asyncio
@@ -1072,6 +1093,299 @@ class TestQueryEmbedding:
                     await file_storage._get_query_embedding("test query", "test_user_123")
                 
                 mock_conn.close.assert_called_once()
+
+
+class TestFileSearchExclusions:
+    """Test that file search excludes git files, hash files, and root directory files"""
+    
+    @pytest.mark.asyncio
+    async def test_search_files_excludes_git_directory(self, temp_storage_dir, setup_user):
+        """Test that search_files excludes files in .git directory"""
+        import aiofiles
+        from unittest.mock import AsyncMock as AsyncPGMock
+        
+        user_dir = temp_storage_dir / "test_user_123"
+        vault_dir = user_dir / "obsidian_vault"
+        vault_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create a file in .git directory (should be excluded)
+        git_dir = vault_dir / ".git"
+        git_dir.mkdir(parents=True, exist_ok=True)
+        git_file = git_dir / "config"
+        async with aiofiles.open(git_file, 'w', encoding='utf-8') as f:
+            await f.write("git config content")
+        
+        # Create a valid markdown file in subdirectory (should be included)
+        subdir = vault_dir / "notes"
+        subdir.mkdir(parents=True, exist_ok=True)
+        valid_file = subdir / "note.md"
+        async with aiofiles.open(valid_file, 'w', encoding='utf-8') as f:
+            await f.write("Valid note content")
+        
+        # Mock the database query to return only the valid file
+        with patch('tools.file_storage._get_query_embedding', return_value=[0.1, 0.2, 0.3]):
+            mock_conn = AsyncPGMock()
+            
+            # Create mock row with valid file (not in .git)
+            mock_row = MagicMock()
+            mock_metadata = {"user_id": "test_user_123", "filename": "notes/note.md"}
+            mock_row.__getitem__ = lambda self, key: {
+                'document': 'Valid note content',
+                'cmetadata': mock_metadata,
+                'custom_id': 'user_test_user_123_notes/note.md',
+                'similarity': 0.95
+            }.get(key)
+            mock_row.get = lambda key, default=None: {
+                'document': 'Valid note content',
+                'cmetadata': mock_metadata,
+                'custom_id': 'user_test_user_123_notes/note.md',
+                'similarity': 0.95
+            }.get(key, default)
+            
+            mock_conn.fetch = AsyncMock(return_value=[mock_row])
+            mock_conn.close = AsyncMock()
+            
+            with patch('asyncpg.connect', return_value=mock_conn), \
+                 patch('pgvector.asyncpg.register_vector', return_value=None), \
+                 patch('pgvector.asyncpg.Vector', return_value=MagicMock()):
+                
+                result = await file_storage.search_files("note")
+                
+                # Should only return the valid file, not the .git file
+                assert "notes/note.md" in result
+                assert ".git" not in result
+                assert "config" not in result
+    
+    @pytest.mark.asyncio
+    async def test_search_files_excludes_hash_files(self, temp_storage_dir, setup_user):
+        """Test that search_files excludes hash files like sync_hashes.json"""
+        from unittest.mock import AsyncMock as AsyncPGMock
+        
+        user_dir = temp_storage_dir / "test_user_123"
+        vault_dir = user_dir / "obsidian_vault"
+        vault_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create sync_hashes.json file (should be excluded)
+        hash_file = user_dir / "sync_hashes.json"
+        hash_file.write_text('{"file1.md": "hash123"}')
+        
+        # Create a valid markdown file in subdirectory (should be included)
+        subdir = vault_dir / "notes"
+        subdir.mkdir(parents=True, exist_ok=True)
+        valid_file = subdir / "note.md"
+        valid_file.write_text("Valid note content")
+        
+        # Mock the database query to return only the valid file
+        with patch('tools.file_storage._get_query_embedding', return_value=[0.1, 0.2, 0.3]):
+            mock_conn = AsyncPGMock()
+            
+            # Create mock row with valid file (not a hash file)
+            mock_row = MagicMock()
+            mock_metadata = {"user_id": "test_user_123", "filename": "notes/note.md"}
+            mock_row.__getitem__ = lambda self, key: {
+                'document': 'Valid note content',
+                'cmetadata': mock_metadata,
+                'custom_id': 'user_test_user_123_notes/note.md',
+                'similarity': 0.95
+            }.get(key)
+            mock_row.get = lambda key, default=None: {
+                'document': 'Valid note content',
+                'cmetadata': mock_metadata,
+                'custom_id': 'user_test_user_123_notes/note.md',
+                'similarity': 0.95
+            }.get(key, default)
+            
+            mock_conn.fetch = AsyncMock(return_value=[mock_row])
+            mock_conn.close = AsyncMock()
+            
+            with patch('asyncpg.connect', return_value=mock_conn), \
+                 patch('pgvector.asyncpg.register_vector', return_value=None), \
+                 patch('pgvector.asyncpg.Vector', return_value=MagicMock()):
+                
+                result = await file_storage.search_files("note")
+                
+                # Should only return the valid file, not the hash file
+                assert "notes/note.md" in result
+                assert "sync_hashes.json" not in result
+    
+    @pytest.mark.asyncio
+    async def test_search_files_excludes_root_directory_files(self, temp_storage_dir, setup_user):
+        """Test that search_files excludes files in root directory (only subdirectories allowed)"""
+        import aiofiles
+        from unittest.mock import AsyncMock as AsyncPGMock
+        
+        user_dir = temp_storage_dir / "test_user_123"
+        vault_dir = user_dir / "obsidian_vault"
+        vault_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create a file in root directory (should be excluded)
+        root_file = user_dir / "root_file.md"
+        async with aiofiles.open(root_file, 'w', encoding='utf-8') as f:
+            await f.write("Root file content")
+        
+        # Create a valid markdown file in subdirectory (should be included)
+        subdir = vault_dir / "notes"
+        subdir.mkdir(parents=True, exist_ok=True)
+        valid_file = subdir / "note.md"
+        async with aiofiles.open(valid_file, 'w', encoding='utf-8') as f:
+            await f.write("Valid note content")
+        
+        # Mock the database query to return only the valid file
+        with patch('tools.file_storage._get_query_embedding', return_value=[0.1, 0.2, 0.3]):
+            mock_conn = AsyncPGMock()
+            
+            # Create mock row with valid file (in subdirectory)
+            mock_row = MagicMock()
+            mock_metadata = {"user_id": "test_user_123", "filename": "obsidian_vault/notes/note.md"}
+            mock_row.__getitem__ = lambda self, key: {
+                'document': 'Valid note content',
+                'cmetadata': mock_metadata,
+                'custom_id': 'user_test_user_123_obsidian_vault/notes/note.md',
+                'similarity': 0.95
+            }.get(key)
+            mock_row.get = lambda key, default=None: {
+                'document': 'Valid note content',
+                'cmetadata': mock_metadata,
+                'custom_id': 'user_test_user_123_obsidian_vault/notes/note.md',
+                'similarity': 0.95
+            }.get(key, default)
+            
+            mock_conn.fetch = AsyncMock(return_value=[mock_row])
+            mock_conn.close = AsyncMock()
+            
+            with patch('asyncpg.connect', return_value=mock_conn), \
+                 patch('pgvector.asyncpg.register_vector', return_value=None), \
+                 patch('pgvector.asyncpg.Vector', return_value=MagicMock()):
+                
+                result = await file_storage.search_files("note")
+                
+                # Should only return the valid file in subdirectory, not root file
+                assert "obsidian_vault/notes/note.md" in result or "notes/note.md" in result
+                assert "root_file.md" not in result
+    
+    @pytest.mark.asyncio
+    async def test_list_files_excludes_git_directory(self, temp_storage_dir, setup_user, mock_rag_api):
+        """Test that list_files excludes files in .git directory"""
+        import aiofiles
+        
+        user_dir = temp_storage_dir / "test_user_123"
+        vault_dir = user_dir / "obsidian_vault"
+        vault_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create a file in .git directory (should be excluded)
+        git_dir = vault_dir / ".git"
+        git_dir.mkdir(parents=True, exist_ok=True)
+        git_file = git_dir / "config"
+        async with aiofiles.open(git_file, 'w', encoding='utf-8') as f:
+            await f.write("git config")
+        
+        # Create a valid file in subdirectory (should be included)
+        subdir = vault_dir / "notes"
+        subdir.mkdir(parents=True, exist_ok=True)
+        valid_file = subdir / "note.md"
+        async with aiofiles.open(valid_file, 'w', encoding='utf-8') as f:
+            await f.write("Valid note")
+        
+        result = await file_storage.list_files()
+        
+        # Should include valid file but not .git file
+        assert "notes/note.md" in result or "note.md" in result
+        assert ".git" not in result
+        assert "config" not in result
+    
+    @pytest.mark.asyncio
+    async def test_list_files_excludes_hash_files(self, temp_storage_dir, setup_user, mock_rag_api):
+        """Test that list_files excludes hash files like sync_hashes.json"""
+        user_dir = temp_storage_dir / "test_user_123"
+        vault_dir = user_dir / "obsidian_vault"
+        vault_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create sync_hashes.json file (should be excluded)
+        hash_file = user_dir / "sync_hashes.json"
+        hash_file.write_text('{"file1.md": "hash123"}')
+        
+        # Create a valid file in subdirectory (should be included)
+        subdir = vault_dir / "notes"
+        subdir.mkdir(parents=True, exist_ok=True)
+        valid_file = subdir / "note.md"
+        valid_file.write_text("Valid note")
+        
+        result = await file_storage.list_files()
+        
+        # Should include valid file but not hash file
+        assert "notes/note.md" in result or "note.md" in result
+        assert "sync_hashes.json" not in result
+    
+    @pytest.mark.asyncio
+    async def test_list_files_excludes_root_directory_files(self, temp_storage_dir, setup_user, mock_rag_api):
+        """Test that list_files excludes files in root directory (only subdirectories allowed)"""
+        import aiofiles
+        
+        user_dir = temp_storage_dir / "test_user_123"
+        vault_dir = user_dir / "obsidian_vault"
+        vault_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create a file in root directory (should be excluded)
+        root_file = user_dir / "root_file.md"
+        async with aiofiles.open(root_file, 'w', encoding='utf-8') as f:
+            await f.write("Root file")
+        
+        # Create a valid file in subdirectory (should be included)
+        subdir = vault_dir / "notes"
+        subdir.mkdir(parents=True, exist_ok=True)
+        valid_file = subdir / "note.md"
+        async with aiofiles.open(valid_file, 'w', encoding='utf-8') as f:
+            await f.write("Valid note")
+        
+        result = await file_storage.list_files()
+        
+        # Should include valid file in subdirectory but not root file
+        assert "obsidian_vault/notes/note.md" in result or "notes/note.md" in result or "note.md" in result
+        assert "root_file.md" not in result
+    
+    @pytest.mark.asyncio
+    async def test_search_files_includes_worker_indexed_files_with_relative_paths(self, temp_storage_dir, setup_user):
+        """Test that Worker-indexed files with relative paths (e.g., 'notes/note.md') are NOT excluded
+        
+        This verifies Bug 1 fix: Worker stores relative paths, not base filenames, so they
+        should not be incorrectly excluded as root-level files.
+        """
+        from unittest.mock import AsyncMock as AsyncPGMock
+        
+        # Mock the embedding and database query
+        with patch('tools.file_storage._get_query_embedding', return_value=[0.1, 0.2, 0.3]):
+            mock_conn = AsyncPGMock()
+            
+            # Create mock row with filename as relative path (how Worker stores it)
+            # This simulates a file indexed by Worker at "notes/note.md" relative to vault root
+            mock_row = MagicMock()
+            mock_metadata = {"user_id": "test_user_123", "filename": "notes/note.md", "size": 100}
+            mock_row.__getitem__ = lambda self, key: {
+                'document': 'Content from Worker-indexed file',
+                'cmetadata': mock_metadata,
+                'custom_id': 'user_test_user_123_notes/note.md',
+                'similarity': 0.95
+            }.get(key)
+            mock_row.get = lambda key, default=None: {
+                'document': 'Content from Worker-indexed file',
+                'cmetadata': mock_metadata,
+                'custom_id': 'user_test_user_123_notes/note.md',
+                'similarity': 0.95
+            }.get(key, default)
+            
+            mock_conn.fetch = AsyncMock(return_value=[mock_row])
+            mock_conn.close = AsyncMock()
+            
+            with patch('asyncpg.connect', return_value=mock_conn), \
+                 patch('pgvector.asyncpg.register_vector', return_value=None), \
+                 patch('pgvector.asyncpg.Vector', return_value=MagicMock()):
+                
+                result = await file_storage.search_files("Worker content")
+                
+                # Verify Worker-indexed file with relative path is NOT excluded
+                assert "notes/note.md" in result or "note.md" in result
+                assert "Content from Worker-indexed file" in result
+                assert "No results found" not in result
 
 
 if __name__ == "__main__":

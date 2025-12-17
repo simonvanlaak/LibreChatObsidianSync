@@ -129,7 +129,14 @@ class IndexingManager:
         Returns:
             True if indexing succeeded, False otherwise
         """
-        filename = file_path.name
+        # Store relative path from vault root (e.g., "notes/note.md") not just base filename
+        # This is needed for proper exclusion checking in search
+        try:
+            relative_path = file_path.relative_to(self.vault_path)
+            filename = str(relative_path)  # Use relative path, e.g., "notes/note.md"
+        except ValueError:
+            # File not in vault path, fall back to base filename
+            filename = file_path.name
         
         for attempt in range(max_retries + 1):  # +1 for initial attempt
             try:
@@ -342,6 +349,19 @@ class GitSync:
                     if any(part.startswith('.') for part in path.parts):
                         logger.debug(f"Skipping file in hidden directory: {path}")
                         continue
+                    
+                    # Exclude files in root directory (only subdirectories allowed)
+                    # This shouldn't happen in vault, but check to be safe
+                    try:
+                        relative_path = path.relative_to(self.vault_path)
+                        if relative_path.parent == Path('.'):
+                            logger.debug(f"Skipping root directory file: {path}")
+                            continue
+                    except ValueError:
+                        # File not in vault path, skip it
+                        logger.debug(f"Skipping file outside vault: {path}")
+                        continue
+                    
                     md_files.append(path)
         
         if not md_files:
