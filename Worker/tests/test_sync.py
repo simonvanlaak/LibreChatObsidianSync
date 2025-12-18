@@ -76,17 +76,19 @@ class TestSyncManager(unittest.TestCase):
         # When user_dir / "git_config.json" is called, return mock_config_path
         mock_user_dir.__truediv__.return_value = mock_config_path
 
-        # Mock file reading - using mock_open is cleaner but this is a quick patch
-        with patch("builtins.open", mock_open(read_data='{"repo_url": "http://test", "token": "abc"}')):
-            mock_storage_root.exists.return_value = True
-            mock_storage_root.iterdir.return_value = [mock_user_dir]
+        # Mock file reading
+        mock_config_path.read_text.return_value = '{"repo_url": "http://test", "token": "abc"}'
+        mock_config_path.with_suffix.return_value = mock_config_path # For atomic write temp file
 
-            manager = SyncManager()
-            manager.process_cycle()
+        mock_storage_root.exists.return_value = True
+        mock_storage_root.iterdir.return_value = [mock_user_dir]
 
-            # Verify GitSync was instantiated and sync() called
-            mock_git_sync.assert_called()
-            mock_git_sync.return_value.sync.assert_called_once()
+        manager = SyncManager()
+        manager.process_cycle()
+
+        # Verify GitSync was instantiated and sync() called
+        mock_git_sync.assert_called()
+        mock_git_sync.return_value.sync.assert_called_once()
 
 if __name__ == '__main__':
     unittest.main()
