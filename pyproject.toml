@@ -11,6 +11,7 @@ readme = "README.md"
 
 [tool.ruff]
 # Ruff configuration for linting and formatting
+extend = "../ruff.toml"
 target-version = "py311"
 line-length = 100
 
