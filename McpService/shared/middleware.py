@@ -14,16 +14,16 @@ class SetUserIdFromHeaderMiddleware(BaseHTTPMiddleware):
     Middleware to extract user ID from OAuth token or headers.
     Also handles auto-configuration of Obsidian sync when customUserVars are provided.
     """
-    
+
     async def dispatch(self, request: Request, call_next):
         import logging
         import sys
         from pathlib import Path
-        
+
         logger = logging.getLogger(__name__)
-        
+
         user_id = None
-        
+
         # Method 1: OAuth Token Extraction (HIGHEST PRIORITY)
         # Extract Bearer token from Authorization header
         auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
@@ -37,9 +37,8 @@ class SetUserIdFromHeaderMiddleware(BaseHTTPMiddleware):
                         logger.info(f"✅ Extracted user_id from OAuth token: {user_id}")
                     else:
                         # Log warning for debugging - token not found in store
-                        logger.warning(f"⚠️ OAuth token provided but not found in token store. Token: {token[:20]}... (token store has {len(TOKENS)} tokens)")
-                        logger.warning(f"⚠️ This usually means the service was restarted and tokens were lost. User needs to re-authenticate.")
-                        logger.warning(f"⚠️ Available tokens in store: {list(TOKENS.keys())[:3] if TOKENS else 'None'}")
+                        logger.warning(f"⚠️ OAuth token provided but not found in token store. Token: {token[:20]}...")
+                        logger.warning(f"⚠️ This usually means the token is invalid or the user needs to re-authenticate.")
                 else:
                     logger.debug(f"Authorization header found but not Bearer token: {auth_header[:20]}...")
             except Exception as e:
@@ -49,45 +48,30 @@ class SetUserIdFromHeaderMiddleware(BaseHTTPMiddleware):
             all_headers = {k: v[:20] + "..." if len(v) > 20 else v for k, v in request.headers.items()}
             logger.warning(f"⚠️ No Authorization header found in request. Available headers: {list(all_headers.keys())}")
             logger.debug(f"Request headers: {all_headers}")
-        
-        # Method 2: Header-based extraction (if OAuth didn't work)
-        if not user_id:
-            user_id = request.headers.get("x-user-id")
-        
-        # If header is missing or is the literal placeholder, try alternative extraction methods
-        if not user_id or user_id == "{{LIBRECHAT_USER_ID}}":
-            # Method 3: Try URL query parameter (fallback)
-            query_user_id = request.query_params.get("userId") or request.query_params.get("user_id")
-            
-            if query_user_id and query_user_id != "{{LIBRECHAT_USER_ID}}":
-                user_id = query_user_id
-                logger.info(f"✅ Extracted user_id from URL query parameter: {user_id}")
-            else:
-                logger.debug(f"Query parameter 'userId' not found or is placeholder")
-        
+
         # Only set user_id if it's valid (not None and not a placeholder)
         if user_id and not (user_id.startswith("{{") and user_id.endswith("}}")):
             set_current_user(user_id)
-            
+
             # Store Obsidian headers in context for potential auto-configuration
             # LibreChat normalizes headers to lowercase, so check both cases
             repo_url = (
-                request.headers.get("x-obsidian-repo-url") or 
+                request.headers.get("x-obsidian-repo-url") or
                 request.headers.get("X-Obsidian-Repo-URL")
             )
             token = (
-                request.headers.get("x-obsidian-token") or 
+                request.headers.get("x-obsidian-token") or
                 request.headers.get("X-Obsidian-Token")
             )
             branch = (
-                request.headers.get("x-obsidian-branch") or 
-                request.headers.get("X-Obsidian-Branch") or 
+                request.headers.get("x-obsidian-branch") or
+                request.headers.get("X-Obsidian-Branch") or
                 "main"
             )
-            
+
             # Store headers in context (even if placeholders, so status check can see them)
             set_obsidian_headers(repo_url, token, branch)
-            
+
             # Auto-configure Obsidian sync if headers are present and valid
             # Only auto-configure if we have repo_url and token (required)
             if repo_url and token:
@@ -95,11 +79,11 @@ class SetUserIdFromHeaderMiddleware(BaseHTTPMiddleware):
                     # Import here to avoid circular dependencies
                     sys.path.insert(0, str(Path(__file__).parent.parent))
                     from tools.obsidian_sync import auto_configure_obsidian_sync
-                    
+
                     # Check if values are not placeholders before calling
                     def is_placeholder(value: str) -> bool:
                         return value and value.startswith("{{") and value.endswith("}}")
-                    
+
                     if not is_placeholder(repo_url) and not is_placeholder(token):
                         await auto_configure_obsidian_sync(user_id, repo_url, token, branch)
                         logger.info(f"✅ Auto-configured Obsidian sync for user {user_id}")
@@ -111,7 +95,7 @@ class SetUserIdFromHeaderMiddleware(BaseHTTPMiddleware):
         else:
             # Don't set invalid user_id - get_current_user() will raise proper error
             set_current_user(None)
-            
+
             # If OAuth is required and no valid user_id found, return 401 to trigger OAuth flow
             # Only do this for MCP endpoint, not for OAuth endpoints themselves
             if request.url.path == "/mcp" or request.url.path.endswith("/mcp"):
@@ -123,7 +107,7 @@ class SetUserIdFromHeaderMiddleware(BaseHTTPMiddleware):
                 )
                 response.headers["WWW-Authenticate"] = "Bearer"
                 return response
-        
+
         response = await call_next(request)
         set_current_user(None)
         clear_obsidian_headers()

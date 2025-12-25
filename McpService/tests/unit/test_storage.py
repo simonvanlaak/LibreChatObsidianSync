@@ -38,7 +38,7 @@ def test_get_user_storage_path(tmp_path, monkeypatch):
     import shared.storage
     importlib.reload(shared.storage)
     from shared.storage import get_user_storage_path
-    
+
     user_id = "test-user-123"
     expected = tmp_path / user_id
     result = get_user_storage_path(user_id)
@@ -53,8 +53,23 @@ def test_get_user_storage_path_creates_directory(tmp_path, monkeypatch):
     import shared.storage
     importlib.reload(shared.storage)
     from shared.storage import get_user_storage_path
-    
+
     user_id = "test-user-456"
     path = get_user_storage_path(user_id)
     assert path.exists()
     assert path.is_dir()
+
+def test_token_store_persistence(tmp_path, monkeypatch):
+    """Test token store persistence across instances"""
+    monkeypatch.setenv("STORAGE_ROOT", str(tmp_path))
+    import importlib
+    import shared.storage
+    importlib.reload(shared.storage)
+    from shared.storage import TokenStore
+
+    db_path = tmp_path / "test_mcp_tokens.db"
+    store1 = TokenStore(db_path=db_path)
+    store1.save_mcp_token("token123", "user123")
+
+    store2 = TokenStore(db_path=db_path)
+    assert store2.get_user_by_mcp_token("token123") == "user123"

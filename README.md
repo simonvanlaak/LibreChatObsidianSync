@@ -10,13 +10,13 @@ This repository contains the infrastructure and deployment configuration for run
 graph TD
     User[User] -->|HTTPS| Master[K3s Master Node]
     Master -->|Traffic| Worker[K3s Worker Node]
-    
+
     subgraph Hetzner Cloud
         Master
         Worker
         Network[Private Network]
     end
-    
+
     CI[GitHub Actions] -->|Terraform| Hetzner[Hetzner API]
     CI -->|Helm| Master
 ```
@@ -213,6 +213,136 @@ When code is pushed to the `main` branch (affecting McpService or Worker):
 3. Parent repository (TheMaryAnne) is automatically triggered to update the submodule reference and deploy both services
 
 **Note:** The unified `build-and-deploy.yml` workflow ensures both MCP Service and Worker images are built and pushed before triggering the parent repo, guaranteeing atomic deployments.
+
+## Testing
+
+ObsidianSync includes comprehensive testing infrastructure with git hooks for automated quality checks.
+
+### Git Hooks
+
+Git hooks run automatically when you commit or push code in the ObsidianSync submodule.
+
+#### Installation
+
+Hooks are installed automatically when you run the root repository's installation script:
+
+```bash
+# From root repository
+./scripts/install-git-hooks.sh
+```
+
+Or manually install hooks in this submodule:
+
+```bash
+cd ObsidianSync
+chmod +x .git/hooks/pre-commit .git/hooks/pre-push
+```
+
+#### Pre-commit Hook
+
+The pre-commit hook runs fast tests before each commit:
+
+- **Linting**: `ruff check McpService/ Worker/`
+- **Formatting**: `ruff format --check` and `black --check`
+- **Type Checking**: `mypy McpService/ Worker/` (non-blocking)
+- **Security**: `bandit -r McpService/ Worker/ -ll` (non-blocking)
+- **Unit Tests**: `pytest McpService/tests/unit/ Worker/tests/unit/ -v`
+
+Run manually:
+```bash
+./scripts/run-fast-tests.sh
+```
+
+Or use the existing comprehensive check script:
+```bash
+./scripts/run-checks.sh
+```
+
+#### Pre-push Hook
+
+The pre-push hook runs integration tests before pushing:
+
+- **Integration Tests**: `pytest McpService/tests/integration/ Worker/tests/integration/ -v`
+- **Full Test Suite**: `pytest tests/ -v`
+- **Coverage Check**: Ensures coverage threshold is met
+- **Docker Build Tests**: Validates both McpService and Worker Dockerfiles build successfully
+- **Dockerfile Lint**: `hadolint` for both Dockerfiles (if available)
+
+Run manually:
+```bash
+./scripts/run-integration-tests.sh
+```
+
+#### Bypass Options
+
+To bypass hooks when needed:
+
+```bash
+# Skip pre-commit hook
+git commit --no-verify
+
+# Skip pre-push hook
+git push --no-verify
+
+# Skip hooks in CI/CD
+export SKIP_HOOKS=true
+```
+
+### Manual Testing
+
+#### Code Quality Checks
+
+```bash
+# Run all checks (lint, format, type-check, security, tests)
+./scripts/run-checks.sh
+
+# Run with auto-fix
+./scripts/run-checks.sh --fix
+
+# Skip tests
+./scripts/run-checks.sh --skip-tests
+```
+
+#### Unit Tests
+
+```bash
+# Run McpService unit tests
+cd McpService
+pytest tests/unit/ -v
+
+# Run Worker unit tests
+cd Worker
+pytest tests/unit/ -v
+```
+
+#### Integration Tests
+
+```bash
+# Run McpService integration tests
+cd McpService
+pytest tests/integration/ -v
+
+# Run Worker integration tests
+cd Worker
+pytest tests/integration/ -v
+```
+
+#### Coverage
+
+```bash
+# Run tests with coverage
+pytest --cov=McpService --cov=Worker --cov-report=term-missing --cov-report=html tests/ -v
+```
+
+#### Docker Build Tests
+
+```bash
+# Test McpService Docker build
+docker build -t test-obsidian-mcp -f McpService/Dockerfile McpService/
+
+# Test Worker Docker build
+docker build -t test-obsidian-worker -f Worker/Dockerfile Worker/
+```
 
 ## Roadmap
 

@@ -5,14 +5,13 @@ from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 from starlette.requests import Request
 from starlette.routing import Route
 from starlette.status import HTTP_400_BAD_REQUEST, HTTP_200_OK
+from .storage import token_store
 
 # OAuth client ID for ObsidianSyncMCP
 CLIENT_ID = "obsidian_sync_mcp"
 
-# In-memory storage for simplicity (since we are a single replica for now)
-# In production with multiple replicas, this should be Redis
+# In-memory storage for auth codes (transient - okay to be in-memory)
 AUTH_CODES = {}  # code -> user_id
-TOKENS = {}      # token -> user_id
 
 def generate_token():
     return secrets.token_urlsafe(32)
@@ -45,22 +44,22 @@ async def authorize(request: Request):
     if request.method == "POST":
         import logging
         logger = logging.getLogger(__name__)
-        
+
         form = await request.form()
         logger.info(f"Authorization POST - action: {form.get('action')}, user_id: {user_id}, redirect_uri: {redirect_uri}")
-        
+
         if form.get("action") == "approve":
             code = generate_auth_code()
             AUTH_CODES[code] = user_id
-            
+
             logger.info(f"Authorization code generated: {code[:10]}... for user_id: {user_id}")
             logger.info(f"Stored in AUTH_CODES. Total codes: {len(AUTH_CODES)}")
-            
+
             # Redirect back to LibreChat
             # Separator is ? or & depending if redirect_uri already has params
             sep = "&" if "?" in redirect_uri else "?"
             target = f"{redirect_uri}{sep}code={code}&state={state}"
-            
+
             logger.info(f"Redirecting to: {target}")
             return RedirectResponse(target, status_code=302)
         else:
@@ -104,52 +103,53 @@ async def token(request: Request):
     """
     import logging
     logger = logging.getLogger(__name__)
-    
+
     if request.method == "POST":
         # Can be form-encoded or JSON
         content_type = request.headers.get("content-type", "")
         logger.info(f"Token request - Content-Type: {content_type}")
-        
+
         if "application/json" in content_type:
             data = await request.json()
         else:
             data = await request.form()
-        
+
         logger.info(f"Token request data: {dict(data) if hasattr(data, 'keys') else data}")
-        
+
         code = data.get("code")
         grant_type = data.get("grant_type")
         code_verifier = data.get("code_verifier")  # PKCE support
-        
+
         logger.info(f"Token request - code: {code[:10] if code else None}..., grant_type: {grant_type}, code_verifier present: {bool(code_verifier)}")
         logger.info(f"Available auth codes: {list(AUTH_CODES.keys())[:3] if AUTH_CODES else 'None'}")
-        
+
         if not code:
             logger.warning("Token request missing 'code' parameter")
             return JSONResponse({"error": "invalid_grant", "error_description": "Missing authorization code"}, status_code=400)
-        
+
         if code not in AUTH_CODES:
             logger.warning(f"Token request with invalid code: {code[:10]}... (not in AUTH_CODES)")
             logger.warning(f"Available codes: {list(AUTH_CODES.keys())}")
             return JSONResponse({"error": "invalid_grant", "error_description": "Invalid or expired authorization code"}, status_code=400)
-            
+
         user_id = AUTH_CODES.pop(code) # Consume code
         access_token = generate_token()
-        TOKENS[access_token] = user_id
-        
-        logger.info(f"Token generated successfully for user_id: {user_id}")
-        
+        token_store.save_mcp_token(access_token, user_id)
+
+        logger.info(f"Token generated and saved successfully for user_id: {user_id}")
+
         return JSONResponse({
             "access_token": access_token,
             "token_type": "Bearer",
             "expires_in": 3600 * 24 * 30, # 30 days
             "scope": "obsidian_sync"
         })
-    
+
     return JSONResponse({"error": "method_not_allowed"}, status_code=405)
 
 def get_user_from_token(token: str):
-    return TOKENS.get(token)
+    """Get the user_id associated with an MCP access token (persisted)"""
+    return token_store.get_user_by_mcp_token(token)
 
 routes = [
     Route("/authorize", authorize, methods=["GET", "POST"]),
