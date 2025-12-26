@@ -32,7 +32,7 @@ This repository aggregates several key components as Git submodules:
 - **[LibreChat](https://github.com/danny-avila/LibreChat)** (`LibreChat/`)  
   The core open-source chat application. We track the official repository to stay updated with the latest features and fixes.
 
-- **[LibreChatMCP](https://github.com/simonvanlaak/LibreChatMCP)** (`LibreChatMCP/`)  
+- **[LibreChat-MCP](https://github.com/simonvanlaak/LibreChat-MCP)** (`LibreChat-MCP/`)  
   A custom Model Context Protocol (MCP) server designed for managing LibreChat. It provides tools for agent management, user-specific file storage, and RAG-powered semantic search.
 
 - **[zotero-mcp](https://github.com/josk0/zotero-mcp)** (`zotero-mcp/`)  
@@ -114,8 +114,8 @@ The application is packaged and deployed using Helm.
   helm upgrade --install librechat ./helm/librechat \
     --set ingress.host=$HOST \
     --set ingress.enabled=true \
-    --set librechatmcp.image=ghcr.io/simonvanlaak/librechatmcp \
-    --set librechatmcp.tag=latest
+    --set librechat-mcp.image=ghcr.io/simonvanlaak/librechat-mcp \
+    --set librechat-mcp.tag=latest
   ```
 
 #### Terraform Apply (local)
@@ -167,11 +167,11 @@ LibreChat MCP is deployed as part of your Kubernetes stack. The CI/CD pipeline w
 #### CI/CD Pipeline Steps
 1. **Build Docker image:**
    ```bash
-   docker build -t ghcr.io/simonvanlaak/librechatmcp:latest -f LibreChatMCP/Dockerfile LibreChatMCP
+   docker build -t ghcr.io/simonvanlaak/librechat-mcp:latest -f LibreChat-MCP/Dockerfile LibreChat-MCP
    ```
 2. **Push Docker image:**
    ```bash
-   docker push ghcr.io/simonvanlaak/librechatmcp:latest
+   docker push ghcr.io/simonvanlaak/librechat-mcp:latest
    ```
 3. **Deploy with Helm:** (see Helm Installation above)
 

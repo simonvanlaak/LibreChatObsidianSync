@@ -1,6 +1,6 @@
 """
 Shared storage utilities for ObsidianSyncMCP.
-Extracted from LibreChatMCP for reuse.
+Extracted from LibreChat-MCP for reuse.
 """
 import os
 import sqlite3
